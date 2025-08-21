@@ -686,14 +686,6 @@ def inicializar_session_state():
             'Liberdade Financeira': {'meta': 1000000.0, 'atual': 0.0}
         }
 
-def format_large_number(num):
-    """Formata números grandes para exibição em cards (k, M)."""
-    if abs(num) >= 1_000_000:
-        return f"R$ {num/1_000_000:.1f}M"
-    if abs(num) >= 1_000:
-        return f"R$ {num/1_000:.1f}k"
-    return f"R$ {num:,.2f}"
-
 def ui_controle_financeiro():
     """Renderiza a interface completa da aba de Controle Financeiro."""
     st.header("Dashboard de Controle Financeiro Pessoal")
@@ -729,10 +721,10 @@ def ui_controle_financeiro():
 
     st.subheader("Resumo do Período")
     col_card1, col_card2, col_card3, col_card4 = st.columns(4)
-    col_card1.metric("Receitas", format_large_number(total_receitas))
-    col_card2.metric("Despesas", format_large_number(total_despesas))
-    col_card3.metric("Investimentos", format_large_number(total_investido))
-    col_card4.metric("Saldo", format_large_number(saldo_periodo))
+    col_card1.metric("Receitas", f"R$ {total_receitas:,.2f}")
+    col_card2.metric("Despesas", f"R$ {total_despesas:,.2f}")
+    col_card3.metric("Investimentos", f"R$ {total_investido:,.2f}")
+    col_card4.metric("Saldo", f"R$ {saldo_periodo:,.2f}")
     
     st.divider()
 
@@ -788,17 +780,12 @@ def ui_controle_financeiro():
 
     st.subheader("Análise Histórica")
     if not df_trans.empty:
-        # Paleta de cores neon
-        neon_palette = ['#00F6FF', '#39FF14', '#FF5252', '#F2A30F', '#7B2BFF']
-        
         # Gráfico ARCA
         df_arca = df_trans[df_trans['Tipo'] == 'Investimento'].groupby('Subcategoria ARCA')['Valor'].sum()
         if not df_arca.empty:
-            fig_arca = px.pie(df_arca, values='Valor', names=df_arca.index, title="Composição dos Investimentos (ARCA)", 
-                              hole=.4, color_discrete_sequence=neon_palette)
-            fig_arca.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
-                                   legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
-            fig_arca.update_traces(textinfo='percent+label', textfont_size=14)
+            fig_arca = px.pie(df_arca, values='Valor', names=df_arca.index, title="Composição dos Investimentos (ARCA)", hole=.3, template="plotly_dark", color_discrete_sequence=['#00F6FF', '#00FF87', '#5372F0', '#A0A4B8'])
+            fig_arca.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
+            fig_arca.update_traces(textinfo='percent+label')
             st.plotly_chart(fig_arca, use_container_width=True)
         else:
             st.info("Nenhum investimento ARCA registrado.")
@@ -840,18 +827,13 @@ def ui_controle_financeiro():
         col1, col2 = st.columns(2)
         with col1:
             df_monthly = df_trans.set_index('Data').groupby([pd.Grouper(freq='M'), 'Tipo'])['Valor'].sum().unstack(fill_value=0)
-            fig_evol_tipo = px.bar(df_monthly, x=df_monthly.index, 
-                                   y=[col for col in ['Receita', 'Despesa', 'Investimento'] if col in df_monthly.columns], 
-                                   title="Evolução Mensal por Tipo", barmode='group', 
-                                   color_discrete_map={'Receita': '#00F6FF', 'Despesa': '#FF5252', 'Investimento': '#39FF14'})
-            fig_evol_tipo.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
-                                        legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
+            fig_evol_tipo = px.bar(df_monthly, x=df_monthly.index, y=[col for col in ['Receita', 'Despesa', 'Investimento'] if col in df_monthly.columns], title="Evolução Mensal por Tipo", barmode='group', template="plotly_dark", color_discrete_sequence=['#00F6FF', '#E94560', '#00FF87'])
+            fig_evol_tipo.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
             st.plotly_chart(fig_evol_tipo, use_container_width=True)
         with col2:
             df_monthly['Patrimonio'] = (df_monthly.get('Receita', 0) - df_monthly.get('Despesa', 0)).cumsum()
             fig_evol_patrimonio = px.line(df_monthly, x=df_monthly.index, y='Patrimonio', title="Evolução Patrimonial", markers=True, template="plotly_dark")
-            fig_evol_patrimonio.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
-                                              legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
+            fig_evol_patrimonio.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
             st.plotly_chart(fig_evol_patrimonio, use_container_width=True)
     else:
         st.info("Adicione transações para visualizar os gráficos de evolução.")
@@ -1486,125 +1468,39 @@ def calcular_greeks(S, K, T, r, sigma, option_type="call"):
         
     return greeks
 
-@st.cache_data
-def analise_tecnica_ativo(ticker):
-    """Realiza a análise técnica completa e retorna um score de convergência."""
-    try:
-        df = yf.download(ticker, period="1y", progress=False)
-        if df.empty:
-            return "Dados Insuficientes", 0, "Não foi possível obter dados para a análise técnica."
-        
-        # Adiciona todos os indicadores ao DataFrame
-        df.ta.rsi(append=True)
-        df.ta.macd(append=True)
-        df.ta.bbands(append=True)
-        df.ta.ema(length=9, append=True)
-        df.ta.ema(length=21, append=True)
-        df.ta.adx(append=True)
-        df.ta.stoch(append=True)
-        df.ta.psar(append=True)
-        df.dropna(inplace=True)
-
-        if df.empty:
-            return "Dados Insuficientes", 0, "Não foi possível calcular os indicadores técnicos."
-
-        # Pega o último valor de cada indicador
-        last = df.iloc[-1]
-        
-        sinais = {}
-        # TIER 1
-        if last['RSI_14'] < 30: sinais['RSI'] = 1
-        elif last['RSI_14'] > 70: sinais['RSI'] = -1
-        else: sinais['RSI'] = 0
-        
-        if last['MACD_12_26_9'] > last['MACDh_12_26_9']: sinais['MACD'] = 1
-        else: sinais['MACD'] = -1
-            
-        if last['Close'] < last['BBL_20_2.0']: sinais['BOLLINGER'] = 1
-        elif last['Close'] > last['BBU_20_2.0']: sinais['BOLLINGER'] = -1
-        else: sinais['BOLLINGER'] = 0
-            
-        if last['EMA_9'] > last['EMA_21']: sinais['EMA'] = 1
-        else: sinais['EMA'] = -1
-
-        # TIER 2
-        if last['ADX_14'] > 25 and last['DMP_14'] > last['DMN_14']: sinais['ADX'] = 1
-        elif last['ADX_14'] > 25 and last['DMN_14'] > last['DMP_14']: sinais['ADX'] = -1
-        else: sinais['ADX'] = 0
-            
-        if last['STOCHk_14_3_3'] < 20: sinais['STOCH'] = 1
-        elif last['STOCHk_14_3_3'] > 80: sinais['STOCH'] = -1
-        else: sinais['STOCH'] = 0
-            
-        if last['Close'] > last['PSARl_0.02_0.2']: sinais['SAR'] = 1
-        else: sinais['SAR'] = -1
-            
-        pesos = {
-            'RSI': 0.20, 'MACD': 0.20, 'BOLLINGER': 0.15, 'EMA': 0.15,
-            'ADX': 0.10, 'STOCH': 0.08, 'SAR': 0.07
-        }
-        
-        score = sum(pesos[ind] * valor for ind, valor in sinais.items())
-        
-        if score > 0.7: sinal_final = "COMPRA FORTE"
-        elif score > 0.2: sinal_final = "COMPRA"
-        elif score < -0.7: sinal_final = "VENDA FORTE"
-        elif score < -0.2: sinal_final = "VENDA"
-        else: sinal_final = "NEUTRO"
-
-        detalhes = f"RSI({last['RSI_14']:.0f}) | MACD({'Alta' if sinais['MACD']==1 else 'Baixa'}) | EMA({'Alta' if sinais['EMA']==1 else 'Baixa'}) | ADX({last['ADX_14']:.0f})"
-        
-        return sinal_final, score, detalhes
-    except Exception as e:
-        return "Erro", 0, f"Erro no cálculo da análise técnica: {e}"
-
-
-def gerar_analise_avancada(row, preco_ativo, vies_fundamental, sinal_tecnico):
-    """Gera uma recomendação de texto para uma opção, integrando todas as análises."""
+def gerar_analise_avancada(row, preco_ativo):
+    """Gera uma recomendação de texto para uma opção."""
     diff_percent = row['Diferença (%)']
     tipo = row['Tipo']
     strike = row['Strike']
     
-    # 1. Análise do Preço da Opção (Derivativos)
-    preco_justo = diff_percent > -20 and diff_percent < 20
-    subvalorizada = diff_percent <= -20
-    sobrevalorizada = diff_percent >= 20
+    # Limites para subvalorização/sobrevalorização
+    UNDERVALUED_THRESHOLD = -20.0 # Preço de mercado 20% mais barato que o teórico
+    OVERVALUED_THRESHOLD = 20.0  # Preço de mercado 20% mais caro que o teórico
+
+    recomendacao_simples = "Preço Justo"
+    detalhe = "O preço de mercado está alinhado com o preço teórico. A decisão de negociar deve se basear em sua estratégia e visão para o ativo."
     
-    # 2. Análise de Convergência
-    recomendacao_final = "Aguardar"
-    analise_texto = ""
+    if diff_percent < UNDERVALUED_THRESHOLD:
+        recomendacao_simples = "Potencial de Compra"
+        detalhe = f"Esta opção está **subvalorizada**. O preço de mercado está **{abs(diff_percent):.1f}% abaixo** do preço teórico. Pode ser uma oportunidade de compra para quem acredita na valorização do prêmio ou na direção do ativo."
+    elif diff_percent > OVERVALUED_THRESHOLD:
+        recomendacao_simples = "Potencial de Venda"
+        detalhe = f"Esta opção está **sobrevalorizada**. O preço de mercado está **{diff_percent:.1f}% acima** do preço teórico. Pode ser uma oportunidade para estratégias de venda (como venda coberta de CALLs) para embolsar um prêmio alto."
 
-    # Cenários para CALLs
+    # Adiciona contexto sobre o "Moneyness"
+    moneyness = ""
     if tipo == 'CALL':
-        if vies_fundamental == "Alta" and "COMPRA" in sinal_tecnico and subvalorizada:
-            recomendacao_final = "Compra Forte de CALL"
-            analise_texto = "Convergência total: O ativo está subvalorizado (fundamentalista), a tendência técnica é de alta e esta opção está barata. Cenário ideal para uma compra de CALL."
-        elif vies_fundamental == "Alta" and "COMPRA" in sinal_tecnico:
-            recomendacao_final = "Compra de CALL"
-            analise_texto = "Sinais alinhados: O viés fundamentalista e técnico são de alta. Embora o preço da opção esteja justo, a direção é favorável. Boa oportunidade para uma compra de CALL."
-        elif vies_fundamental == "Alta" and "VENDA" in sinal_tecnico:
-            recomendacao_final = "Aguardar (Conflito)"
-            analise_texto = "Sinais conflitantes: O ativo está subvalorizado no longo prazo, mas a tendência técnica atual é de baixa. Comprar uma CALL agora seria ir contra a maré. Aguarde a reversão da tendência técnica."
-        else:
-            recomendacao_final = "Não Recomendado"
-            analise_texto = "A operação não é recomendada. O viés fundamentalista e/ou técnico não suporta uma estratégia de alta para esta CALL no momento."
+        if strike < preco_ativo: moneyness = "ITM (Dentro do Dinheiro)"
+        elif strike > preco_ativo: moneyness = "OTM (Fora do Dinheiro)"
+        else: moneyness = "ATM (No Dinheiro)"
+    else: # PUT
+        if strike > preco_ativo: moneyness = "ITM (Dentro do Dinheiro)"
+        elif strike < preco_ativo: moneyness = "OTM (Fora do Dinheiro)"
+        else: moneyness = "ATM (No Dinheiro)"
 
-    # Cenários para PUTs
-    if tipo == 'PUT':
-        if vies_fundamental == "Baixa" and "VENDA" in sinal_tecnico and subvalorizada:
-            recomendacao_final = "Compra Forte de PUT"
-            analise_texto = "Convergência total: O ativo está sobrevalorizado (fundamentalista), a tendência técnica é de baixa e esta opção está barata. Cenário ideal para uma compra de PUT."
-        elif vies_fundamental == "Baixa" and "VENDA" in sinal_tecnico:
-            recomendacao_final = "Compra de PUT"
-            analise_texto = "Sinais alinhados: O viés fundamentalista e técnico são de baixa. Embora o preço da opção esteja justo, a direção é favorável. Boa oportunidade para uma compra de PUT."
-        elif vies_fundamental == "Baixa" and "COMPRA" in sinal_tecnico:
-            recomendacao_final = "Aguardar (Conflito)"
-            analise_texto = "Sinais conflitantes: O ativo está sobrevalorizado no longo prazo, mas a tendência técnica atual é de alta. Comprar uma PUT agora seria arriscado. Aguarde a reversão da tendência técnica."
-        else:
-            recomendacao_final = "Não Recomendado"
-            analise_texto = "A operação não é recomendada. O viés fundamentalista e/ou técnico não suporta uma estratégia de baixa para esta PUT no momento."
-
-    return recomendacao_final, analise_texto
+    analise_final = f"**Recomendação:** {recomendacao_simples}\n\n**Análise:** {detalhe}\n\n**Situação:** A opção está **{moneyness}**."
+    return recomendacao_simples, analise_final
 
 
 def ui_black_scholes():
@@ -1681,7 +1577,7 @@ def ui_black_scholes():
                         'Ticker': row['ticker'], 'Tipo': row['tipo'], 'Strike': row['strike'],
                         'Preço Mercado': row['preco_mercado'], 'Preço Teórico (BS)': preco_bs,
                         'Recomendação': recomendacao, 'Análise Detalhada': analise_detalhada,
-                        **greeks
+                        **{k.capitalize(): v for k, v in greeks.items()}
                     }
                     resultados.append(res)
                 
