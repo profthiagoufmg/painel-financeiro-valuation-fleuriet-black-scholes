@@ -9,8 +9,7 @@ opções pelo modelo de Black-Scholes com análise avançada.
 
 O código foi revisado com base em um TCC sobre valuation que utiliza os modelos
 EVA e EFV, bem como o modelo de Hamada para ajuste do beta.
-Versão 3: Adiciona análise de recomendação em Black-Scholes e melhora o CSS
-para temas claro e escuro.
+Versão 4: Melhora a formatação dos cards, cores dos gráficos e estilo das tabelas.
 """
 
 import os
@@ -54,6 +53,8 @@ st.markdown("""
         --border-color: #DEE2E6;
         --tab-active-bg: #E9ECEF;
         --tab-inactive-text: #6C757D;
+        --table-header-bg: #F8F9FA;
+        --table-row-hover-bg: #F1F3F5;
     }
 
     /* 2. Sobrescrita das Variáveis para Tema Escuro */
@@ -70,6 +71,8 @@ st.markdown("""
         --border-color: #5372F0;
         --tab-active-bg: #323A52;
         --tab-inactive-text: #A0A4B8;
+        --table-header-bg: #16213E;
+        --table-row-hover-bg: #323A52;
     }
 
     /* 3. Estilos Gerais que usam as variáveis (funcionam para ambos os temas) */
@@ -130,14 +133,16 @@ st.markdown("""
         box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
     }
     .stMetric label { color: var(--text-color); }
-    .stMetric > div[data-testid="stMetricValue"] { color: var(--header-color) !important; }
+    .stMetric > div[data-testid="stMetricValue"] { 
+        color: var(--header-color) !important; 
+        font-size: 2.25rem; /* Ajuste para caber melhor */
+    }
     .stMetric > div[data-testid="stMetricDelta"] > div[data-testid="stMetricDelta"] {
         color: var(--positive-accent) !important;
     }
     .stMetric > div[data-testid="stMetricDelta"] > div[data-testid="stMetricDelta"].st-ae {
         color: var(--negative-accent) !important;
     }
-
 
     /* Botões */
     .stButton > button {
@@ -171,7 +176,29 @@ st.markdown("""
     }
     
     /* Cor do texto geral */
-    .stMarkdown, .stTable, .stDataFrame, .stSelectbox label, .stDateInput label, .stNumberInput label, .stTextInput label {
+    .stMarkdown, .stSelectbox label, .stDateInput label, .stNumberInput label, .stTextInput label {
+        color: var(--text-color);
+    }
+    
+    /* Estilização de Tabelas (st.dataframe, st.table, st.data_editor) */
+    .stDataFrame, .stTable {
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        overflow: hidden; /* Garante que o border-radius seja aplicado nos cantos */
+    }
+    .stDataFrame thead, .stTable thead {
+        background-color: var(--table-header-bg);
+    }
+    .stDataFrame th, .stTable th {
+        color: var(--header-color);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .stDataFrame tbody tr:hover, .stTable tbody tr:hover {
+        background-color: var(--table-row-hover-bg);
+    }
+    .stDataFrame td, .stTable td {
         color: var(--text-color);
     }
 </style>""", unsafe_allow_html=True)
@@ -658,6 +685,14 @@ def inicializar_session_state():
             'Liberdade Financeira': {'meta': 1000000.0, 'atual': 0.0}
         }
 
+def format_large_number(num):
+    """Formata números grandes para exibição em cards (k, M)."""
+    if abs(num) >= 1_000_000:
+        return f"R$ {num/1_000_000:.1f}M"
+    if abs(num) >= 1_000:
+        return f"R$ {num/1_000:.1f}k"
+    return f"R$ {num:,.2f}"
+
 def ui_controle_financeiro():
     """Renderiza a interface completa da aba de Controle Financeiro."""
     st.header("Dashboard de Controle Financeiro Pessoal")
@@ -693,10 +728,10 @@ def ui_controle_financeiro():
 
     st.subheader("Resumo do Período")
     col_card1, col_card2, col_card3, col_card4 = st.columns(4)
-    col_card1.metric("Receitas", f"R$ {total_receitas:,.2f}")
-    col_card2.metric("Despesas", f"R$ {total_despesas:,.2f}")
-    col_card3.metric("Investimentos", f"R$ {total_investido:,.2f}")
-    col_card4.metric("Saldo", f"R$ {saldo_periodo:,.2f}")
+    col_card1.metric("Receitas", format_large_number(total_receitas))
+    col_card2.metric("Despesas", format_large_number(total_despesas))
+    col_card3.metric("Investimentos", format_large_number(total_investido))
+    col_card4.metric("Saldo", format_large_number(saldo_periodo))
     
     st.divider()
 
@@ -752,12 +787,17 @@ def ui_controle_financeiro():
 
     st.subheader("Análise Histórica")
     if not df_trans.empty:
+        # Paleta de cores neon
+        neon_palette = ['#00F6FF', '#39FF14', '#FF5252', '#F2A30F', '#7B2BFF']
+        
         # Gráfico ARCA
         df_arca = df_trans[df_trans['Tipo'] == 'Investimento'].groupby('Subcategoria ARCA')['Valor'].sum()
         if not df_arca.empty:
-            fig_arca = px.pie(df_arca, values='Valor', names=df_arca.index, title="Composição dos Investimentos (ARCA)", hole=.3, template="plotly_dark", color_discrete_sequence=['#00F6FF', '#00FF87', '#5372F0', '#A0A4B8'])
-            fig_arca.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
-            fig_arca.update_traces(textinfo='percent+label')
+            fig_arca = px.pie(df_arca, values='Valor', names=df_arca.index, title="Composição dos Investimentos (ARCA)", 
+                              hole=.4, color_discrete_sequence=neon_palette)
+            fig_arca.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
+                                   legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
+            fig_arca.update_traces(textinfo='percent+label', textfont_size=14)
             st.plotly_chart(fig_arca, use_container_width=True)
         else:
             st.info("Nenhum investimento ARCA registrado.")
@@ -799,13 +839,18 @@ def ui_controle_financeiro():
         col1, col2 = st.columns(2)
         with col1:
             df_monthly = df_trans.set_index('Data').groupby([pd.Grouper(freq='M'), 'Tipo'])['Valor'].sum().unstack(fill_value=0)
-            fig_evol_tipo = px.bar(df_monthly, x=df_monthly.index, y=[col for col in ['Receita', 'Despesa', 'Investimento'] if col in df_monthly.columns], title="Evolução Mensal por Tipo", barmode='group', template="plotly_dark", color_discrete_sequence=['#00F6FF', '#E94560', '#00FF87'])
-            fig_evol_tipo.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
+            fig_evol_tipo = px.bar(df_monthly, x=df_monthly.index, 
+                                   y=[col for col in ['Receita', 'Despesa', 'Investimento'] if col in df_monthly.columns], 
+                                   title="Evolução Mensal por Tipo", barmode='group', 
+                                   color_discrete_map={'Receita': '#00F6FF', 'Despesa': '#FF5252', 'Investimento': '#39FF14'})
+            fig_evol_tipo.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
+                                        legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
             st.plotly_chart(fig_evol_tipo, use_container_width=True)
         with col2:
             df_monthly['Patrimonio'] = (df_monthly.get('Receita', 0) - df_monthly.get('Despesa', 0)).cumsum()
             fig_evol_patrimonio = px.line(df_monthly, x=df_monthly.index, y='Patrimonio', title="Evolução Patrimonial", markers=True, template="plotly_dark")
-            fig_evol_patrimonio.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
+            fig_evol_patrimonio.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
+                                              legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
             st.plotly_chart(fig_evol_patrimonio, use_container_width=True)
     else:
         st.info("Adicione transações para visualizar os gráficos de evolução.")
