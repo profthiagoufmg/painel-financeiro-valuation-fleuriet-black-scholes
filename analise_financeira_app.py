@@ -1494,15 +1494,24 @@ def analise_tecnica_ativo(ticker):
         if df.empty:
             return "Dados Insuficientes", 0, {}, "Não foi possível obter dados para a análise técnica."
         
-        # Adiciona todos os indicadores ao DataFrame
-        df.ta.rsi(append=True)
-        df.ta.macd(append=True)
-        df.ta.bbands(append=True)
-        df.ta.ema(length=9, append=True)
-        df.ta.ema(length=21, append=True)
-        df.ta.adx(append=True)
-        df.ta.stoch(append=True)
-        df.ta.psar(append=True)
+        # Define a estratégia com os indicadores desejados
+        MyStrategy = ta.Strategy(
+            name="Convergencia_Opcoes",
+            description="RSI, MACD, BBANDS, EMA, ADX, STOCH, PSAR",
+            ta=[
+                {"kind": "rsi"},
+                {"kind": "macd"},
+                {"kind": "bbands"},
+                {"kind": "ema", "length": 9},
+                {"kind": "ema", "length": 21},
+                {"kind": "adx"},
+                {"kind": "stoch"},
+                {"kind": "psar"},
+            ]
+        )
+        
+        # Roda a estratégia no DataFrame
+        df.ta.strategy(MyStrategy)
         df.dropna(inplace=True)
 
         if df.empty:
@@ -1578,7 +1587,7 @@ def analise_tecnica_ativo(ticker):
             'ADX': 0.10, 'STOCH': 0.08, 'SAR': 0.07
         }
         
-        score = sum(pesos[ind] * valor for ind, valor in sinais.items())
+        score = sum(pesos.get(ind, 0) * valor for ind, valor in sinais.items())
         
         if score > 0.7: sinal_final = "COMPRA FORTE"
         elif score > 0.2: sinal_final = "COMPRA"
