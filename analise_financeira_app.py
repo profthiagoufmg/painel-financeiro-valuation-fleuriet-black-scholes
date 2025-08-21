@@ -9,7 +9,9 @@ opções pelo modelo de Black-Scholes com análise avançada.
 
 O código foi revisado com base em um TCC sobre valuation que utiliza os modelos
 EVA e EFV, bem como o modelo de Hamada para ajuste do beta.
-Versão 5: Integra análise técnica e fundamentalista na recomendação de opções.
+Versão 6: Corrige erro de MultiIndex, adiciona limiares de score configuráveis,
+           "combos" de confirmação e análise multi-timeframe (diário/semanal)
+           na aba Black-Scholes.
 """
 
 import os
@@ -795,9 +797,9 @@ def ui_controle_financeiro():
         df_arca = df_trans[df_trans['Tipo'] == 'Investimento'].groupby('Subcategoria ARCA')['Valor'].sum()
         if not df_arca.empty:
             fig_arca = px.pie(df_arca, values='Valor', names=df_arca.index, title="Composição dos Investimentos (ARCA)", 
-                              hole=.4, color_discrete_sequence=neon_palette)
+                                hole=.4, color_discrete_sequence=neon_palette)
             fig_arca.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
-                                   legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
+                                    legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
             fig_arca.update_traces(textinfo='percent+label', textfont_size=14)
             st.plotly_chart(fig_arca, use_container_width=True)
         else:
@@ -825,25 +827,25 @@ def ui_controle_financeiro():
         # O gráfico de evolução do patrimônio (Investimento)
         if not df_patrimonio_filtrado.empty:
             fig_evol_patrimonio_investimento = px.line(df_patrimonio_filtrado, 
-                                                       y=df_patrimonio_filtrado.values, 
-                                                       title="Evolução do Patrimônio (Investimentos)", 
-                                                       labels={'index': 'Data', 'y': 'Patrimônio Total'},
-                                                       markers=True, 
-                                                       template="plotly_dark")
+                                                        y=df_patrimonio_filtrado.values, 
+                                                        title="Evolução do Patrimônio (Investimentos)", 
+                                                        labels={'index': 'Data', 'y': 'Patrimônio Total'},
+                                                        markers=True, 
+                                                        template="plotly_dark")
             fig_evol_patrimonio_investimento.update_layout(paper_bgcolor='rgba(0,0,0,0)', 
-                                                           plot_bgcolor='rgba(0,0,0,0)', 
-                                                           font_color='var(--text-color)', 
-                                                           title_font_color='var(--header-color)',
-                                                           yaxis_title='Patrimônio Total (R$)')
+                                                            plot_bgcolor='rgba(0,0,0,0)', 
+                                                            font_color='var(--text-color)', 
+                                                            title_font_color='var(--header-color)',
+                                                            yaxis_title='Patrimônio Total (R$)')
             st.plotly_chart(fig_evol_patrimonio_investimento, use_container_width=True)
 
         col1, col2 = st.columns(2)
         with col1:
             df_monthly = df_trans.set_index('Data').groupby([pd.Grouper(freq='M'), 'Tipo'])['Valor'].sum().unstack(fill_value=0)
             fig_evol_tipo = px.bar(df_monthly, x=df_monthly.index, 
-                                   y=[col for col in ['Receita', 'Despesa', 'Investimento'] if col in df_monthly.columns], 
-                                   title="Evolução Mensal por Tipo", barmode='group', 
-                                   color_discrete_map={'Receita': '#00F6FF', 'Despesa': '#FF5252', 'Investimento': '#39FF14'})
+                                    y=[col for col in ['Receita', 'Despesa', 'Investimento'] if col in df_monthly.columns], 
+                                    title="Evolução Mensal por Tipo", barmode='group', 
+                                    color_discrete_map={'Receita': '#00F6FF', 'Despesa': '#FF5252', 'Investimento': '#39FF14'})
             fig_evol_tipo.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
                                         legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
             st.plotly_chart(fig_evol_tipo, use_container_width=True)
@@ -851,7 +853,7 @@ def ui_controle_financeiro():
             df_monthly['Patrimonio'] = (df_monthly.get('Receita', 0) - df_monthly.get('Despesa', 0)).cumsum()
             fig_evol_patrimonio = px.line(df_monthly, x=df_monthly.index, y='Patrimonio', title="Evolução Patrimonial", markers=True, template="plotly_dark")
             fig_evol_patrimonio.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
-                                              legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
+                                                legend_font_color='var(--text-color)', title_font_color='var(--header-color)')
             st.plotly_chart(fig_evol_patrimonio, use_container_width=True)
     else:
         st.info("Adicione transações para visualizar os gráficos de evolução.")
@@ -1487,31 +1489,36 @@ def calcular_greeks(S, K, T, r, sigma, option_type="call"):
     return greeks
 
 @st.cache_data
-def analise_tecnica_ativo(ticker):
-    """Realiza a análise técnica completa e retorna um score de convergência."""
+def analise_tecnica_ativo(ticker, timeframe='daily', weekly_bias=0, thresholds=None):
+    """
+    Realiza a análise técnica completa e retorna um score de convergência.
+    NOVO: Suporta múltiplos tempos gráficos e combos de confirmação.
+    """
+    if thresholds is None:
+        thresholds = {'forte': 0.7, 'normal': 0.2}
+
     try:
-        df = yf.download(ticker, period="1y", progress=False)
-        
-        # FIX: Garante que o dataframe não tenha MultiIndex nas colunas
+        # Define período e intervalo com base no timeframe
+        if timeframe == 'weekly':
+            df = yf.download(ticker, period="5y", interval="1wk", progress=False)
+        else: # daily
+            df = yf.download(ticker, period="2y", interval="1d", progress=False)
+
+        # CORREÇÃO ROBUSTA PARA O ERRO DE MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(0)
 
         if df.empty:
-            return "Dados Insuficientes", 0, {"Erro": "Dados do yfinance vazios."}
-        
+            return "Dados Insuficientes", 0, {"Erro": "Dados do yfinance vazios."}, "NEUTRO"
+
         # Define a estratégia com os indicadores desejados
         MyStrategy = ta.Strategy(
             name="Convergencia_Opcoes",
             description="RSI, MACD, BBANDS, EMA, ADX, STOCH, PSAR",
             ta=[
-                {"kind": "rsi"},
-                {"kind": "macd"},
-                {"kind": "bbands"},
-                {"kind": "ema", "length": 9},
-                {"kind": "ema", "length": 21},
-                {"kind": "adx"},
-                {"kind": "stoch"},
-                {"kind": "psar"},
+                {"kind": "rsi"}, {"kind": "macd"}, {"kind": "bbands"},
+                {"kind": "ema", "length": 9}, {"kind": "ema", "length": 21},
+                {"kind": "adx"}, {"kind": "stoch"}, {"kind": "psar"},
             ]
         )
         
@@ -1520,15 +1527,15 @@ def analise_tecnica_ativo(ticker):
         df.dropna(inplace=True)
 
         if df.empty:
-            return "Dados Insuficientes", 0, {"Erro": "Não foi possível calcular os indicadores."}
+            return "Dados Insuficientes", 0, {"Erro": "Não foi possível calcular os indicadores."}, "NEUTRO"
 
         # Pega o último valor de cada indicador
         last = df.iloc[-1]
         
         sinais = {}
         valores_indicadores = {}
-
-        # TIER 1
+        
+        # Lógica de Sinais (igual para ambos os timeframes)
         try:
             rsi_val = last['RSI_14']
             valores_indicadores['RSI'] = f"{rsi_val:.1f}"
@@ -1542,21 +1549,26 @@ def analise_tecnica_ativo(ticker):
             if last['MACD_12_26_9'] > last['MACDs_12_26_9']: sinais['MACD'] = 1
             else: sinais['MACD'] = -1
         except (KeyError, TypeError): sinais['MACD'] = 0; valores_indicadores['MACD'] = "Erro"
-            
+        
         try:
             valores_indicadores['Bandas de Bollinger'] = f"{last['BBP_20_2.0']:.2f}"
             if last['Close'] < last['BBL_20_2.0']: sinais['BOLLINGER'] = 1
             elif last['Close'] > last['BBU_20_2.0']: sinais['BOLLINGER'] = -1
             else: sinais['BOLLINGER'] = 0
         except (KeyError, TypeError): sinais['BOLLINGER'] = 0; valores_indicadores['Bandas de Bollinger'] = "Erro"
-            
+        
         try:
             valores_indicadores['EMA (9 vs 21)'] = "Cruz. Alta" if last['EMA_9'] > last['EMA_21'] else "Cruz. Baixa"
             if last['EMA_9'] > last['EMA_21']: sinais['EMA'] = 1
             else: sinais['EMA'] = -1
         except (KeyError, TypeError): sinais['EMA'] = 0; valores_indicadores['EMA (9 vs 21)'] = "Erro"
 
-        # TIER 2
+        # Se for análise semanal, só precisamos do viés de tendência
+        if timeframe == 'weekly':
+            weekly_bias_signal = "Alta" if sinais.get('EMA', 0) > 0 and sinais.get('MACD', 0) > 0 else ("Baixa" if sinais.get('EMA', 0) < 0 and sinais.get('MACD', 0) < 0 else "Neutro")
+            return "Viés Semanal", 0, valores_indicadores, weekly_bias_signal
+
+        # Continua para análise diária...
         try:
             adx_val = last['ADX_14']
             valores_indicadores['ADX'] = f"{adx_val:.1f}"
@@ -1594,17 +1606,32 @@ def analise_tecnica_ativo(ticker):
         
         score = sum(pesos.get(ind, 0) * valor for ind, valor in sinais.items())
         
-        if score > 0.7: sinal_final = "COMPRA FORTE"
-        elif score > 0.2: sinal_final = "COMPRA"
-        elif score < -0.7: sinal_final = "VENDA FORTE"
-        elif score < -0.2: sinal_final = "VENDA"
-        else: sinal_final = "NEUTRO"
+        # Adiciona o viés da tendência semanal ao score
+        score_ajustado = score + (0.15 * weekly_bias) # Viés semanal tem 15% de peso
+        
+        # Lógica de "Combo" de Confirmação
+        tendencia_alta = sinais.get('MACD', 0) > 0 or sinais.get('EMA', 0) > 0
+        momento_alta = sinais.get('RSI', 0) > 0 or sinais.get('STOCH', 0) > 0
+        tendencia_baixa = sinais.get('MACD', 0) < 0 or sinais.get('EMA', 0) < 0
+        momento_baixa = sinais.get('RSI', 0) < 0 or sinais.get('STOCH', 0) < 0
 
-        return sinal_final, score, valores_indicadores
+        # Determinação do Sinal Final com base nos novos limiares e combos
+        if score_ajustado > thresholds['forte'] and tendencia_alta and momento_alta:
+            sinal_final = "COMPRA FORTE"
+        elif score_ajustado > thresholds['normal']:
+            sinal_final = "COMPRA"
+        elif score_ajustado < -thresholds['forte'] and tendencia_baixa and momento_baixa:
+            sinal_final = "VENDA FORTE"
+        elif score_ajustado < -thresholds['normal']:
+            sinal_final = "VENDA"
+        else:
+            sinal_final = "NEUTRO"
+
+        return sinal_final, score_ajustado, valores_indicadores, "N/A" # N/A para bias pois é a análise principal
     except Exception as e:
-        return "Erro", 0, {"Erro": str(e)}
+        return "Erro", 0, {"Erro": str(e)}, "NEUTRO"
 
-def gerar_analise_avancada(row, vies_fundamental, sinal_tecnico):
+def gerar_analise_avancada(row, vies_fundamental, sinal_tecnico, vies_semanal):
     """Gera uma recomendação de texto para uma opção, integrando todas as análises."""
     diff_percent = row['Diferença (%)']
     tipo = row['Tipo']
@@ -1618,33 +1645,33 @@ def gerar_analise_avancada(row, vies_fundamental, sinal_tecnico):
 
     # Cenários para CALLs
     if tipo == 'CALL':
-        if vies_fundamental == "Alta" and "COMPRA" in sinal_tecnico and subvalorizada:
+        if vies_fundamental == "Alta" and "COMPRA" in sinal_tecnico and vies_semanal == "Alta" and subvalorizada:
             recomendacao_final = "Compra Forte de CALL"
-            analise_texto = "Convergência total: O ativo está subvalorizado (fundamentalista), a tendência técnica é de alta e esta opção está barata. Cenário ideal para uma compra de CALL."
-        elif vies_fundamental == "Alta" and "COMPRA" in sinal_tecnico:
+            analise_texto = "Convergência total: O ativo está subvalorizado (fundamental), a tendência semanal é de alta, o sinal técnico diário é forte e esta opção está barata. Cenário ideal para uma compra de CALL."
+        elif vies_fundamental == "Alta" and "COMPRA" in sinal_tecnico and vies_semanal != "Baixa":
             recomendacao_final = "Compra de CALL"
-            analise_texto = "Sinais alinhados: O viés fundamentalista e técnico são de alta. Embora o preço da opção esteja justo, a direção é favorável. Boa oportunidade para uma compra de CALL."
+            analise_texto = "Sinais alinhados: O viés fundamentalista e técnico são de alta, com tendência semanal favorável. Boa oportunidade para uma compra de CALL."
         elif vies_fundamental == "Alta" and "VENDA" in sinal_tecnico:
             recomendacao_final = "Aguardar (Conflito)"
-            analise_texto = "Sinais conflitantes: O ativo está subvalorizado no longo prazo, mas a tendência técnica atual é de baixa. Comprar uma CALL agora seria ir contra a maré. Aguarde a reversão da tendência técnica."
+            analise_texto = "Sinais conflitantes: O ativo está subvalorizado no longo prazo (fundamental), mas a tendência técnica de curto prazo é de baixa. Comprar uma CALL agora seria ir contra a maré. Aguarde a reversão da tendência técnica."
         else:
             recomendacao_final = "Não Recomendado"
-            analise_texto = "A operação não é recomendada. O viés fundamentalista e/ou técnico não suporta uma estratégia de alta para esta CALL no momento."
+            analise_texto = "A operação não é recomendada. Os sinais fundamentalista, técnico ou de tendência semanal não suportam uma estratégia de alta para esta CALL no momento."
 
     # Cenários para PUTs
     if tipo == 'PUT':
-        if vies_fundamental == "Baixa" and "VENDA" in sinal_tecnico and subvalorizada:
+        if vies_fundamental == "Baixa" and "VENDA" in sinal_tecnico and vies_semanal == "Baixa" and subvalorizada:
             recomendacao_final = "Compra Forte de PUT"
-            analise_texto = "Convergência total: O ativo está sobrevalorizado (fundamentalista), a tendência técnica é de baixa e esta opção está barata. Cenário ideal para uma compra de PUT."
-        elif vies_fundamental == "Baixa" and "VENDA" in sinal_tecnico:
+            analise_texto = "Convergência total: O ativo está sobrevalorizado (fundamental), a tendência semanal é de baixa, o sinal técnico diário é forte e esta opção está barata. Cenário ideal para uma compra de PUT."
+        elif vies_fundamental == "Baixa" and "VENDA" in sinal_tecnico and vies_semanal != "Alta":
             recomendacao_final = "Compra de PUT"
-            analise_texto = "Sinais alinhados: O viés fundamentalista e técnico são de baixa. Embora o preço da opção esteja justo, a direção é favorável. Boa oportunidade para uma compra de PUT."
+            analise_texto = "Sinais alinhados: O viés fundamentalista e técnico são de baixa, com tendência semanal favorável. Boa oportunidade para uma compra de PUT."
         elif vies_fundamental == "Baixa" and "COMPRA" in sinal_tecnico:
             recomendacao_final = "Aguardar (Conflito)"
-            analise_texto = "Sinais conflitantes: O ativo está sobrevalorizado no longo prazo, mas a tendência técnica atual é de alta. Comprar uma PUT agora seria arriscado. Aguarde a reversão da tendência técnica."
+            analise_texto = "Sinais conflitantes: O ativo está sobrevalorizado no longo prazo (fundamental), mas a tendência técnica de curto prazo é de alta. Comprar uma PUT agora seria arriscado. Aguarde a reversão da tendência técnica."
         else:
             recomendacao_final = "Não Recomendado"
-            analise_texto = "A operação não é recomendada. O viés fundamentalista e/ou técnico não suporta uma estratégia de baixa para esta PUT no momento."
+            analise_texto = "A operação não é recomendada. Os sinais fundamentalista, técnico ou de tendência semanal não suportam uma estratégia de baixa para esta PUT no momento."
 
     return recomendacao_final, analise_texto
 
@@ -1672,6 +1699,16 @@ def ui_black_scholes():
             st.write("") # Espaçamento
             analisar_opcoes_btn = st.form_submit_button("Analisar Opções", use_container_width=True)
 
+    with st.expander("Opções Avançadas de Análise Técnica", expanded=False):
+        st.markdown("Ajuste os limiares para definir a força do sinal técnico.")
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            threshold_forte = st.slider("Limiar para Sinal FORTE", 0.1, 1.0, 0.65, 0.05)
+        with col_t2:
+            threshold_normal = st.slider("Limiar para Sinal NORMAL", 0.1, 1.0, 0.25, 0.05)
+        
+        thresholds_config = {'forte': threshold_forte, 'normal': threshold_normal}
+
     if analisar_opcoes_btn:
         ticker_sa = f"{ticker_selecionado}.SA"
         
@@ -1693,8 +1730,14 @@ def ui_black_scholes():
                     vies_fundamental = "Neutro"
                 st.session_state['vies_fundamental_bs'] = vies_fundamental
 
-                # 2. Análise Técnica
-                sinal_tecnico, score_tecnico, detalhes_tecnicos = analise_tecnica_ativo(ticker_sa)
+                # 2. Análise Técnica (Multi-Timeframe)
+                # 2.1 Análise Semanal para viés de tendência
+                _, _, _, vies_semanal = analise_tecnica_ativo(ticker_sa, timeframe='weekly')
+                st.session_state['vies_semanal_bs'] = vies_semanal
+                weekly_bias_value = 1 if vies_semanal == "Alta" else (-1 if vies_semanal == "Baixa" else 0)
+
+                # 2.2 Análise Diária com viés semanal
+                sinal_tecnico, score_tecnico, detalhes_tecnicos, _ = analise_tecnica_ativo(ticker_sa, timeframe='daily', weekly_bias=weekly_bias_value, thresholds=thresholds_config)
                 st.session_state['sinal_tecnico_bs'] = sinal_tecnico
                 st.session_state['detalhes_tecnicos_bs'] = detalhes_tecnicos
                 
@@ -1722,7 +1765,7 @@ def ui_black_scholes():
                     diferenca_percentual = ((row['preco_mercado'] - preco_bs) / preco_bs * 100) if preco_bs > 0 else 0
                     
                     res_temp = {'Diferença (%)': diferenca_percentual, 'Tipo': row['tipo'], 'Strike': row['strike']}
-                    recomendacao, analise_detalhada = gerar_analise_avancada(res_temp, vies_fundamental, sinal_tecnico)
+                    recomendacao, analise_detalhada = gerar_analise_avancada(res_temp, vies_fundamental, sinal_tecnico, vies_semanal)
                     
                     res = {
                         'Ticker': row['ticker'], 'Tipo': row['tipo'], 'Strike': row['strike'],
@@ -1737,19 +1780,23 @@ def ui_black_scholes():
 
             except Exception as e:
                 st.error(f"Ocorreu um erro durante a análise completa: {e}")
+                import traceback
+                st.error(traceback.format_exc())
                 st.stop()
 
     if 'df_resultados_bs' in st.session_state:
         st.subheader("Diagnóstico do Ativo Subjacente")
         vies_fundamental = st.session_state.get('vies_fundamental_bs', "N/A")
         sinal_tecnico = st.session_state.get('sinal_tecnico_bs', "N/A")
+        vies_semanal = st.session_state.get('vies_semanal_bs', "N/A")
         detalhes_tecnicos = st.session_state.get('detalhes_tecnicos_bs', {})
         
-        col1, col2 = st.columns(2)
-        col1.metric("Viés Fundamentalista (Valuation)", vies_fundamental)
-        col2.metric("Sinal Técnico (Curto Prazo)", sinal_tecnico)
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Viés Fundamentalista (Longo Prazo)", vies_fundamental)
+        col2.metric("Viés de Tendência (Semanal)", vies_semanal)
+        col3.metric("Sinal Técnico (Diário)", sinal_tecnico)
 
-        with st.expander("Detalhes da Análise Técnica"):
+        with st.expander("Detalhes da Análise Técnica Diária"):
             st.table(pd.DataFrame.from_dict(detalhes_tecnicos, orient='index', columns=['Valor/Sinal']))
         
         st.divider()
