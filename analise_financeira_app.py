@@ -9,9 +9,9 @@ opções pelo modelo de Black-Scholes com análise avançada.
 
 O código foi revisado com base em um TCC sobre valuation que utiliza os modelos
 EVA e EFV, bem como o modelo de Hamada para ajuste do beta.
-Versão 6: Corrige erro de MultiIndex, adiciona limiares de score configuráveis,
-           "combos" de confirmação e análise multi-timeframe (diário/semanal)
-           na aba Black-Scholes.
+Versão 7: Corrige erro 'NoneType' em yfinance. Melhora a visibilidade de textos
+           no modo escuro (CSS). Adiciona explicação detalhada para as opções
+           avançadas de análise técnica.
 """
 
 import os
@@ -172,15 +172,15 @@ st.markdown("""
         border: 1px solid var(--border-color);
         border-radius: 8px;
     }
-    [data-testid="stExpander"] summary, [data-testid="stForm"] label {
+    [data-testid="stExpander"] summary {
         font-size: 1.1em;
         font-weight: 600;
-        color: var(--header-color) !important;
+        color: var(--text-color) !important; /* CORREÇÃO DE COR */
     }
     
-    /* Cor do texto geral */
-    .stMarkdown, .stSelectbox label, .stDateInput label, .stNumberInput label, .stTextInput label {
-        color: var(--text-color);
+    /* Cor do texto geral e labels dos widgets */
+    .stMarkdown, .stSelectbox > label, .stDateInput > label, .stNumberInput > label, .stTextInput > label, .stSlider > label {
+        color: var(--text-color) !important; /* CORREÇÃO DE COR */
     }
     
     /* Estilização de Tabelas (st.dataframe, st.table, st.data_editor) */
@@ -1428,7 +1428,7 @@ def ui_modelo_fleuriet():
 def calcular_volatilidade_historica(ticker, periodo="1y"):
     """Calcula a volatilidade histórica anualizada de um ativo."""
     dados = yf.download(ticker, period=periodo, progress=False)
-    if dados.empty:
+    if dados is None or dados.empty:
         return None
     dados['log_retorno'] = np.log(dados['Close'] / dados['Close'].shift(1))
     # 252 dias de pregão em um ano
@@ -1504,12 +1504,12 @@ def analise_tecnica_ativo(ticker, timeframe='daily', weekly_bias=0, thresholds=N
         else: # daily
             df = yf.download(ticker, period="2y", interval="1d", progress=False)
 
-        # CORREÇÃO ROBUSTA PARA O ERRO DE MultiIndex
+        # CORREÇÃO ROBUSTA PARA O ERRO 'NoneType' e 'MultiIndex'
+        if df is None or df.empty:
+            return "Dados Insuficientes", 0, {"Erro": "Dados do yfinance vazios ou ticker inválido."}, "NEUTRO"
+            
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(0)
-
-        if df.empty:
-            return "Dados Insuficientes", 0, {"Erro": "Dados do yfinance vazios."}, "NEUTRO"
 
         # Define a estratégia com os indicadores desejados
         MyStrategy = ta.Strategy(
@@ -1700,7 +1700,18 @@ def ui_black_scholes():
             analisar_opcoes_btn = st.form_submit_button("Analisar Opções", use_container_width=True)
 
     with st.expander("Opções Avançadas de Análise Técnica", expanded=False):
-        st.markdown("Ajuste os limiares para definir a força do sinal técnico.")
+        st.markdown("""
+        Esta seção permite ajustar a sensibilidade do modelo de análise técnica. Os limiares definem o quão forte a pontuação dos indicadores precisa ser para gerar um sinal de compra ou venda.
+
+        - **Limiar para Sinal FORTE:** Define a pontuação mínima para um sinal ser considerado "Forte". Requer que múltiplos indicadores de tendência e momento estejam alinhados.
+        - **Limiar para Sinal NORMAL:** Define a pontuação mínima para um sinal "Normal".
+
+        **Como ajustar:**
+        - **Valores mais altos** (ex: 0.8 para Forte) tornam o modelo **mais seletivo e exigente**, gerando menos sinais, porém mais confiáveis.
+        - **Valores mais baixos** (ex: 0.4 para Forte) tornam o modelo **mais sensível**, gerando mais sinais, que podem incluir mais "falsos positivos".
+        
+        *Obs: Os valores são independentes e não precisam somar 1.*
+        """)
         col_t1, col_t2 = st.columns(2)
         with col_t1:
             threshold_forte = st.slider("Limiar para Sinal FORTE", 0.1, 1.0, 0.65, 0.05)
