@@ -9,9 +9,10 @@ opções pelo modelo de Black-Scholes com análise avançada.
 
 O código foi revisado com base em um TCC sobre valuation que utiliza os modelos
 EVA e EFV, bem como o modelo de Hamada para ajuste do beta.
-Versão 7: Corrige erro 'NoneType' em yfinance. Melhora a visibilidade de textos
-           no modo escuro (CSS). Adiciona explicação detalhada para as opções
-           avançadas de análise técnica.
+Versão 8: Implementa sistema de retentativa automática (retry) para todas as
+           chamadas de rede (CVM, yfinance) para máxima resiliência. Adiciona
+           "trava de segurança" para evitar crashes por falha de dados.
+           Corrige CSS e adiciona explicações.
 """
 
 import os
@@ -27,7 +28,7 @@ import io
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from tenacity import retry, wait_exponential, stop_after_attempt
+from tenacity import retry, wait_exponential, stop_after_attempt, RetryError
 from scipy.stats import norm
 import pandas_ta as ta
 
@@ -237,6 +238,25 @@ CONFIG["DIRETORIO_DADOS_EXTRAIDOS"] = CONFIG["DIRETORIO_BASE"] / "CVM_EXTRACTED"
 # LÓGICA DE DADOS GERAL (CVM, MERCADO, ETC.)
 # ==============================================================================
 
+# Decorador de retentativa para chamadas de rede
+retry_decorator = retry(
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    stop=stop_after_attempt(3)
+)
+
+@retry_decorator
+def robust_get_request(url, timeout=60):
+    """Função robusta para fazer requisições GET com retentativas."""
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response
+
+@retry_decorator
+def robust_yf_download(*args, **kwargs):
+    """Função robusta para baixar dados do yfinance com retentativas."""
+    return yf.download(*args, **kwargs)
+
+
 @st.cache_data
 def setup_diretorios():
     """Cria os diretórios locais para armazenar os dados da CVM (se permitido)."""
@@ -271,9 +291,8 @@ def preparar_dados_cvm(anos_historico):
             url_zip = f'{CONFIG["URL_BASE_CVM"]}{nome_zip}'
 
             try:
-                # Baixa o arquivo ZIP para a memória
-                response = requests.get(url_zip, timeout=60)
-                response.raise_for_status()
+                # Baixa o arquivo ZIP para a memória usando a função robusta
+                response = robust_get_request(url_zip)
                 zip_buffer = io.BytesIO(response.content)
 
                 # Abre o ZIP a partir da memória e processa os arquivos CSV necessários
@@ -291,8 +310,8 @@ def preparar_dados_cvm(anos_historico):
                         else:
                             st.warning(f"Arquivo {nome_arquivo_csv} não encontrado no zip do ano {ano}.")
 
-            except requests.exceptions.RequestException as e:
-                st.warning(f"Erro ao baixar o arquivo ZIP do ano {ano}. Erro: {e}")
+            except RetryError as e:
+                st.error(f"Falha ao baixar dados da CVM para o ano {ano} após múltiplas tentativas. Servidor pode estar offline. Erro: {e}")
                 continue
             except Exception as e:
                 st.warning(f"Erro ao processar dados do ano {ano}. Erro: {e}")
@@ -579,10 +598,10 @@ def carregar_mapeamento_ticker_cvm():
 23280;VITT3;VITTIA FERTILIZANTES E BIOLOGICOS S.A.
 23280;VIVA3;VIVARA PARTICIPACOES S.A.
 23280;VIVT3;TELEFONICA BRASIL S.A.
-23280;VLID3;VALID SOLUCOES S.A.
+23280;VLID3;VALID SOLUcoes S.A.
 23280;VULC3;VULCABRAS S.A.
 23280;WEGE3;WEG S.A.
-23280;WIZS3;WIZ SOLUCOES E CORRETAGEM DE SEGUROS S.A.
+23280;WIZS3;WIZ SOLUcoes E CORRETAGEM DE SEGUROS S.A.
 23280;YDUQ3;YDUQS PARTICIPACOES S.A.
 25801;REDE3;REDE ENERGIA PARTICIPAÇÕES S.A.
 25810;GGPS3;GPS PARTICIPAÇÕES E EMPREENDIMENTOS S.A.
@@ -619,17 +638,13 @@ def carregar_mapeamento_ticker_cvm():
         st.error(f"Falha ao carregar o mapeamento de tickers. Erro: {e}")
         return pd.DataFrame()
 
-@retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(3))
+@retry_decorator
 def consulta_bc(codigo_bcb):
     """Consulta a API do Banco Central para obter dados como a taxa Selic."""
-    try:
-        url = f'https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_bcb}/dados/ultimos/1?formato=json'
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        return float(data[0]['valor']) / 100.0 if data else None
-    except Exception as e:
-        raise Exception(f"Erro ao consultar a API do Banco Central. Código: {codigo_bcb}. Erro: {e}")
+    url = f'https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_bcb}/dados/ultimos/1?formato=json'
+    response = robust_get_request(url, timeout=10)
+    data = response.json()
+    return float(data[0]['valor']) / 100.0 if data else None
 
 @st.cache_data(show_spinner=False)
 def obter_dados_mercado(periodo_ibov):
@@ -637,12 +652,18 @@ def obter_dados_mercado(periodo_ibov):
     with st.spinner("Buscando dados de mercado (Selic, Ibovespa)..."):
         try:
             selic_anual = consulta_bc(1178)
-        except Exception:
+        except RetryError:
+            st.warning("Não foi possível buscar a taxa Selic do Banco Central. Usando valor padrão.")
             selic_anual = None
         
         risk_free_rate = selic_anual if selic_anual is not None else 0.105
         
-        ibov = yf.download('^BVSP', period=periodo_ibov, progress=False)
+        try:
+            ibov = robust_yf_download('^BVSP', period=periodo_ibov, progress=False)
+        except RetryError:
+            st.warning("Não foi possível buscar dados do Ibovespa do Yahoo Finance. Usando valores padrão.")
+            ibov = pd.DataFrame()
+
         if not ibov.empty and 'Adj Close' in ibov.columns:
             retorno_anual_mercado = ((1 + ibov['Adj Close'].pct_change().mean()) ** 252) - 1
         else:
@@ -895,8 +916,11 @@ def ui_controle_financeiro():
 # ==============================================================================
 def calcular_beta(ticker, ibov_data, periodo_beta):
     """Calcula o Beta de uma ação em relação ao Ibovespa de forma robusta."""
-    dados_acao = yf.download(ticker, period=periodo_beta, progress=False, auto_adjust=True)['Close']
-    if dados_acao.empty:
+    try:
+        dados_acao = robust_yf_download(ticker, period=periodo_beta, progress=False, auto_adjust=True)['Close']
+        if dados_acao.empty:
+            return 1.0
+    except (RetryError, Exception):
         return 1.0
 
     # Alinha os dataframes usando merge para garantir consistência
@@ -951,6 +975,9 @@ def processar_valuation_empresa(ticker_sa, codigo_cvm, demonstrativos, market_da
     bpp = demonstrativos.get('bpp', pd.DataFrame())
     dfc = demonstrativos.get('dfc_mi', pd.DataFrame())
     
+    if dre.empty or bpa.empty or bpp.empty or dfc.empty:
+        return None, "Dados da CVM não puderam ser baixados. Análise de valuation impossível."
+
     empresa_dre = dre[dre['CD_CVM'] == codigo_cvm] if not dre.empty else pd.DataFrame()
     empresa_bpa = bpa[bpa['CD_CVM'] == codigo_cvm] if not bpa.empty else pd.DataFrame()
     empresa_bpp = bpp[bpp['CD_CVM'] == codigo_cvm] if not bpp.empty else pd.DataFrame()
@@ -1427,21 +1454,23 @@ def ui_modelo_fleuriet():
 @st.cache_data
 def calcular_volatilidade_historica(ticker, periodo="1y"):
     """Calcula a volatilidade histórica anualizada de um ativo."""
-    dados = yf.download(ticker, period=periodo, progress=False)
-    if dados is None or dados.empty:
+    try:
+        dados = robust_yf_download(ticker, period=periodo, progress=False)
+        if dados is None or dados.empty:
+            return None
+        dados['log_retorno'] = np.log(dados['Close'] / dados['Close'].shift(1))
+        # 252 dias de pregão em um ano
+        volatilidade_anualizada = dados['log_retorno'].std() * np.sqrt(252)
+        return volatilidade_anualizada
+    except (RetryError, Exception):
         return None
-    dados['log_retorno'] = np.log(dados['Close'] / dados['Close'].shift(1))
-    # 252 dias de pregão em um ano
-    volatilidade_anualizada = dados['log_retorno'].std() * np.sqrt(252)
-    return volatilidade_anualizada
 
 @st.cache_data
 def buscar_opcoes(ticker, vencimento):
     """Busca a cadeia de opções para um ticker e vencimento específicos."""
     try:
         url = f'https://opcoes.net.br/listaopcoes/completa?idAcao={ticker}&listarVencimentos=false&cotacoes=true&vencimentos={vencimento}'
-        response = requests.get(url, timeout=20)
-        response.raise_for_status()
+        response = robust_get_request(url, timeout=20)
         dados = response.json()
         if 'data' in dados and 'cotacoesOpcoes' in dados['data']:
             opcoes = [[ticker, vencimento, i[0].split('_')[0], i[2], i[3], i[5], i[8]] for i in dados['data']['cotacoesOpcoes']]
@@ -1451,7 +1480,7 @@ def buscar_opcoes(ticker, vencimento):
             return df
         else:
             return pd.DataFrame()
-    except requests.exceptions.RequestException as e:
+    except (RetryError, requests.exceptions.RequestException) as e:
         st.error(f"Erro ao buscar dados de opções: {e}")
         return pd.DataFrame()
 
@@ -1500,9 +1529,9 @@ def analise_tecnica_ativo(ticker, timeframe='daily', weekly_bias=0, thresholds=N
     try:
         # Define período e intervalo com base no timeframe
         if timeframe == 'weekly':
-            df = yf.download(ticker, period="5y", interval="1wk", progress=False)
+            df = robust_yf_download(ticker, period="5y", interval="1wk", progress=False)
         else: # daily
-            df = yf.download(ticker, period="2y", interval="1d", progress=False)
+            df = robust_yf_download(ticker, period="2y", interval="1d", progress=False)
 
         # CORREÇÃO ROBUSTA PARA O ERRO 'NoneType' e 'MultiIndex'
         if df is None or df.empty:
@@ -1628,7 +1657,7 @@ def analise_tecnica_ativo(ticker, timeframe='daily', weekly_bias=0, thresholds=N
             sinal_final = "NEUTRO"
 
         return sinal_final, score_ajustado, valores_indicadores, "N/A" # N/A para bias pois é a análise principal
-    except Exception as e:
+    except (RetryError, Exception) as e:
         return "Erro", 0, {"Erro": str(e)}, "NEUTRO"
 
 def gerar_analise_avancada(row, vies_fundamental, sinal_tecnico, vies_semanal):
@@ -1731,11 +1760,17 @@ def ui_black_scholes():
                 demonstrativos = preparar_dados_cvm(CONFIG["HISTORICO_ANOS_CVM"])
                 market_data = obter_dados_mercado(CONFIG["PERIODO_BETA_IBOV"])
                 params_analise = {'taxa_crescimento_perpetuidade': CONFIG["TAXA_CRESCIMENTO_PERPETUIDADE"], 'media_anos_calculo': CONFIG["MEDIA_ANOS_CALCULO"], 'periodo_beta_ibov': CONFIG["PERIODO_BETA_IBOV"]}
-                resultados_valuation, _ = processar_valuation_empresa(ticker_sa, codigo_cvm, demonstrativos, market_data, params_analise)
                 
-                if resultados_valuation and resultados_valuation['Margem Segurança (%)'] > 15:
+                resultados_valuation, status_msg = processar_valuation_empresa(ticker_sa, codigo_cvm, demonstrativos, market_data, params_analise)
+                
+                # TRAVA DE SEGURANÇA: Interrompe se o valuation falhar
+                if resultados_valuation is None:
+                    st.error(f"Falha na Análise Fundamentalista: {status_msg}. A análise de opções não pode continuar.")
+                    st.stop()
+
+                if resultados_valuation['Margem Segurança (%)'] > 15:
                     vies_fundamental = "Alta"
-                elif resultados_valuation and resultados_valuation['Margem Segurança (%)'] < -15:
+                elif resultados_valuation['Margem Segurança (%)'] < -15:
                     vies_fundamental = "Baixa"
                 else:
                     vies_fundamental = "Neutro"
@@ -1790,7 +1825,7 @@ def ui_black_scholes():
                 st.session_state['df_resultados_bs'] = df_resultados
 
             except Exception as e:
-                st.error(f"Ocorreu um erro durante a análise completa: {e}")
+                st.error(f"Ocorreu um erro inesperado durante a análise completa: {e}")
                 import traceback
                 st.error(traceback.format_exc())
                 st.stop()
@@ -1808,7 +1843,12 @@ def ui_black_scholes():
         col3.metric("Sinal Técnico (Diário)", sinal_tecnico)
 
         with st.expander("Detalhes da Análise Técnica Diária"):
-            st.table(pd.DataFrame.from_dict(detalhes_tecnicos, orient='index', columns=['Valor/Sinal']))
+            # Trava de segurança para a tabela de detalhes
+            if isinstance(detalhes_tecnicos, dict):
+                st.table(pd.DataFrame.from_dict(detalhes_tecnicos, orient='index', columns=['Valor/Sinal']))
+            else:
+                st.warning("Não foi possível exibir os detalhes da análise técnica.")
+
         
         st.divider()
 
