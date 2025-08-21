@@ -1513,31 +1513,46 @@ def analise_tecnica_ativo(ticker):
         
         sinais = {}
         # TIER 1
-        if last['RSI_14'] < 30: sinais['RSI'] = 1
-        elif last['RSI_14'] > 70: sinais['RSI'] = -1
-        else: sinais['RSI'] = 0
-        
-        if last['MACD_12_26_9'] > last['MACDh_12_26_9']: sinais['MACD'] = 1
-        else: sinais['MACD'] = -1
+        try:
+            if last['RSI_14'] < 30: sinais['RSI'] = 1
+            elif last['RSI_14'] > 70: sinais['RSI'] = -1
+            else: sinais['RSI'] = 0
+        except KeyError: sinais['RSI'] = 0
+
+        try:
+            if last['MACD_12_26_9'] > last['MACDs_12_26_9']: sinais['MACD'] = 1
+            else: sinais['MACD'] = -1
+        except KeyError: sinais['MACD'] = 0
             
-        if last['Close'] < last['BBL_20_2.0']: sinais['BOLLINGER'] = 1
-        elif last['Close'] > last['BBU_20_2.0']: sinais['BOLLINGER'] = -1
-        else: sinais['BOLLINGER'] = 0
+        try:
+            if last['Close'] < last['BBL_20_2.0']: sinais['BOLLINGER'] = 1
+            elif last['Close'] > last['BBU_20_2.0']: sinais['BOLLINGER'] = -1
+            else: sinais['BOLLINGER'] = 0
+        except KeyError: sinais['BOLLINGER'] = 0
             
-        if last['EMA_9'] > last['EMA_21']: sinais['EMA'] = 1
-        else: sinais['EMA'] = -1
+        try:
+            if last['EMA_9'] > last['EMA_21']: sinais['EMA'] = 1
+            else: sinais['EMA'] = -1
+        except KeyError: sinais['EMA'] = 0
 
         # TIER 2
-        if last['ADX_14'] > 25 and last['DMP_14'] > last['DMN_14']: sinais['ADX'] = 1
-        elif last['ADX_14'] > 25 and last['DMN_14'] > last['DMP_14']: sinais['ADX'] = -1
-        else: sinais['ADX'] = 0
+        try:
+            if last['ADX_14'] > 25 and last['DMP_14'] > last['DMN_14']: sinais['ADX'] = 1
+            elif last['ADX_14'] > 25 and last['DMN_14'] > last['DMP_14']: sinais['ADX'] = -1
+            else: sinais['ADX'] = 0
+        except KeyError: sinais['ADX'] = 0
             
-        if last['STOCHk_14_3_3'] < 20: sinais['STOCH'] = 1
-        elif last['STOCHk_14_3_3'] > 80: sinais['STOCH'] = -1
-        else: sinais['STOCH'] = 0
+        try:
+            if last['STOCHk_14_3_3'] < 20: sinais['STOCH'] = 1
+            elif last['STOCHk_14_3_3'] > 80: sinais['STOCH'] = -1
+            else: sinais['STOCH'] = 0
+        except KeyError: sinais['STOCH'] = 0
             
-        if last['Close'] > last['PSARl_0.02_0.2']: sinais['SAR'] = 1
-        else: sinais['SAR'] = -1
+        try:
+            if not pd.isna(last['PSARl_0.02_0.2']): sinais['SAR'] = 1
+            elif not pd.isna(last['PSARs_0.02_0.2']): sinais['SAR'] = -1
+            else: sinais['SAR'] = 0
+        except KeyError: sinais['SAR'] = 0
             
         pesos = {
             'RSI': 0.20, 'MACD': 0.20, 'BOLLINGER': 0.15, 'EMA': 0.15,
@@ -1552,7 +1567,7 @@ def analise_tecnica_ativo(ticker):
         elif score < -0.2: sinal_final = "VENDA"
         else: sinal_final = "NEUTRO"
 
-        detalhes = f"RSI({last['RSI_14']:.0f}) | MACD({'Alta' if sinais['MACD']==1 else 'Baixa'}) | EMA({'Alta' if sinais['EMA']==1 else 'Baixa'}) | ADX({last['ADX_14']:.0f})"
+        detalhes = f"RSI({last.get('RSI_14', 0):.0f}) | MACD({'Alta' if sinais.get('MACD', 0)==1 else 'Baixa'}) | EMA({'Alta' if sinais.get('EMA', 0)==1 else 'Baixa'}) | ADX({last.get('ADX_14', 0):.0f})"
         
         return sinal_final, score, detalhes
     except Exception as e:
