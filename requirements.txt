@@ -7,3 +7,4 @@ tenacity
 scipy
 numpy
 pandas-ta
+setuptools
