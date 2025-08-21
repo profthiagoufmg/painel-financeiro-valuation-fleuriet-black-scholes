@@ -1633,15 +1633,17 @@ def ui_black_scholes():
                 st.info(f"Nenhuma opção de {tipo_opcao} encontrada para este vencimento.")
                 return
 
-            st.dataframe(df[['Ticker', 'Strike', 'Preço Mercado', 'Preço Teórico (BS)', 'Recomendação', 'Delta', 'Vega', 'Theta']],
+            st.dataframe(df[['Ticker', 'Strike', 'Preço Mercado', 'Preço Teórico (BS)', 'Recomendação', 'Delta', 'Gamma', 'Vega', 'Theta', 'Rho']],
                          use_container_width=True, hide_index=True,
                          column_config={
                              "Strike": st.column_config.NumberColumn("Strike", format="R$ %.2f"),
                              "Preço Mercado": st.column_config.NumberColumn("Preço Mercado", format="R$ %.4f"),
                              "Preço Teórico (BS)": st.column_config.NumberColumn("Preço Teórico", format="R$ %.4f"),
                              "Delta": st.column_config.NumberColumn(format="%.3f"),
+                             "Gamma": st.column_config.NumberColumn(format="%.3f"),
                              "Vega": st.column_config.NumberColumn(format="%.3f"),
                              "Theta": st.column_config.NumberColumn(format="%.3f"),
+                             "Rho": st.column_config.NumberColumn(format="%.3f"),
                          })
             
             st.markdown("---")
