@@ -6,3 +6,4 @@ plotly
 tenacity
 scipy
 numpy
+pandas-ta
