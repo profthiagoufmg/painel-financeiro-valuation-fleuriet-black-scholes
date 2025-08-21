@@ -1491,8 +1491,13 @@ def analise_tecnica_ativo(ticker):
     """Realiza a análise técnica completa e retorna um score de convergência."""
     try:
         df = yf.download(ticker, period="1y", progress=False)
+        
+        # FIX: Garante que o dataframe não tenha MultiIndex nas colunas
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(0)
+
         if df.empty:
-            return "Dados Insuficientes", 0, {}, "Não foi possível obter dados para a análise técnica."
+            return "Dados Insuficientes", 0, {"Erro": "Dados do yfinance vazios."}
         
         # Define a estratégia com os indicadores desejados
         MyStrategy = ta.Strategy(
@@ -1515,7 +1520,7 @@ def analise_tecnica_ativo(ticker):
         df.dropna(inplace=True)
 
         if df.empty:
-            return "Dados Insuficientes", 0, {}, "Não foi possível calcular os indicadores técnicos."
+            return "Dados Insuficientes", 0, {"Erro": "Não foi possível calcular os indicadores."}
 
         # Pega o último valor de cada indicador
         last = df.iloc[-1]
@@ -1795,7 +1800,7 @@ def ui_black_scholes():
             st.markdown("""
             As "Greeks" (Gregas) medem a sensibilidade do preço de uma opção a diferentes fatores. Entendê-las ajuda a gerenciar o risco.
 
-            - **Delta (Δ):** Mede o quanto o preço da opção muda para cada R\$ 1,00 de mudança no preço do ativo. Varia de 0 a 1 para Calls e -1 a 0 para Puts. Um Delta de 0.60 significa que a opção valoriza R\$ 0,60 se o ativo subir R\$ 1,00.
+            - **Delta (Δ):** Mede o quanto o preço da opção muda para cada R$ 1,00 de mudança no preço do ativo. Varia de 0 a 1 para Calls e -1 a 0 para Puts. Um Delta de 0.60 significa que a opção valoriza R$ 0,60 se o ativo subir R$ 1,00.
 
             - **Gamma (Γ):** Mede a taxa de variação do Delta. Indica o quão rápido o Delta muda. Um Gamma alto significa que o Delta é muito sensível a mudanças no preço do ativo, o que é comum em opções "ATM" (no dinheiro).
 
