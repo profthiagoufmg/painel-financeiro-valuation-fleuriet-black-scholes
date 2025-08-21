@@ -1588,7 +1588,7 @@ def analise_tecnica_ativo(ticker):
 
         return sinal_final, score, valores_indicadores
     except Exception as e:
-        return "Erro", 0, {}, f"Erro no cálculo da análise técnica: {e}"
+        return "Erro", 0, {"Erro": str(e)}
 
 def gerar_analise_avancada(row, vies_fundamental, sinal_tecnico):
     """Gera uma recomendação de texto para uma opção, integrando todas as análises."""
@@ -1638,6 +1638,11 @@ def gerar_analise_avancada(row, vies_fundamental, sinal_tecnico):
 def ui_black_scholes():
     """Renderiza a interface da aba Black-Scholes."""
     st.header("Precificação de Opções e Análise Avançada")
+    st.info("""
+    **Como funciona o vencimento de opções no Brasil?**
+    As opções na B3 (bolsa brasileira) vencem sempre na **terceira sexta-feira de cada mês**. 
+    Para encontrar opções com liquidez, escolha uma data de vencimento futura que corresponda a uma terceira sexta-feira.
+    """)
     
     ticker_cvm_map_df = carregar_mapeamento_ticker_cvm()
     lista_tickers = sorted(ticker_cvm_map_df['TICKER'].unique())
@@ -1703,7 +1708,7 @@ def ui_black_scholes():
                     diferenca_percentual = ((row['preco_mercado'] - preco_bs) / preco_bs * 100) if preco_bs > 0 else 0
                     
                     res_temp = {'Diferença (%)': diferenca_percentual, 'Tipo': row['tipo'], 'Strike': row['strike']}
-                    recomendacao, analise_detalhada = gerar_analise_avancada(res_temp, preco_atual_ativo, vies_fundamental, sinal_tecnico)
+                    recomendacao, analise_detalhada = gerar_analise_avancada(res_temp, vies_fundamental, sinal_tecnico)
                     
                     res = {
                         'Ticker': row['ticker'], 'Tipo': row['tipo'], 'Strike': row['strike'],
@@ -1781,7 +1786,7 @@ def ui_black_scholes():
             st.markdown("""
             As "Greeks" (Gregas) medem a sensibilidade do preço de uma opção a diferentes fatores. Entendê-las ajuda a gerenciar o risco.
 
-            - **Delta (Δ):** Mede o quanto o preço da opção muda para cada R$ 1,00 de mudança no preço do ativo. Varia de 0 a 1 para Calls e -1 a 0 para Puts. Um Delta de 0.60 significa que a opção valoriza R$ 0,60 se o ativo subir R$ 1,00.
+            - **Delta (Δ):** Mede o quanto o preço da opção muda para cada R\$ 1,00 de mudança no preço do ativo. Varia de 0 a 1 para Calls e -1 a 0 para Puts. Um Delta de 0.60 significa que a opção valoriza R\$ 0,60 se o ativo subir R\$ 1,00.
 
             - **Gamma (Γ):** Mede a taxa de variação do Delta. Indica o quão rápido o Delta muda. Um Gamma alto significa que o Delta é muito sensível a mudanças no preço do ativo, o que é comum em opções "ATM" (no dinheiro).
 
