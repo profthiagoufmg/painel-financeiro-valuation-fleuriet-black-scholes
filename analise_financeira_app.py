@@ -9,7 +9,7 @@ opções pelo modelo de Black-Scholes com análise avançada.
 
 O código foi revisado com base em um TCC sobre valuation que utiliza os modelos
 EVA e EFV, bem como o modelo de Hamada para ajuste do beta.
-Versão 4: Melhora a formatação dos cards, cores dos gráficos e estilo das tabelas.
+Versão 5: Integra análise técnica e fundamentalista na recomendação de opções.
 """
 
 import os
@@ -27,6 +27,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from tenacity import retry, wait_exponential, stop_after_attempt
 from scipy.stats import norm
+import pandas_ta as ta
 
 # Ignorar avisos para uma saída mais limpa
 warnings.filterwarnings('ignore')
@@ -1485,39 +1486,125 @@ def calcular_greeks(S, K, T, r, sigma, option_type="call"):
         
     return greeks
 
-def gerar_analise_avancada(row, preco_ativo):
-    """Gera uma recomendação de texto para uma opção."""
+@st.cache_data
+def analise_tecnica_ativo(ticker):
+    """Realiza a análise técnica completa e retorna um score de convergência."""
+    try:
+        df = yf.download(ticker, period="1y", progress=False)
+        if df.empty:
+            return "Dados Insuficientes", 0, "Não foi possível obter dados para a análise técnica."
+        
+        # Adiciona todos os indicadores ao DataFrame
+        df.ta.rsi(append=True)
+        df.ta.macd(append=True)
+        df.ta.bbands(append=True)
+        df.ta.ema(length=9, append=True)
+        df.ta.ema(length=21, append=True)
+        df.ta.adx(append=True)
+        df.ta.stoch(append=True)
+        df.ta.psar(append=True)
+        df.dropna(inplace=True)
+
+        if df.empty:
+            return "Dados Insuficientes", 0, "Não foi possível calcular os indicadores técnicos."
+
+        # Pega o último valor de cada indicador
+        last = df.iloc[-1]
+        
+        sinais = {}
+        # TIER 1
+        if last['RSI_14'] < 30: sinais['RSI'] = 1
+        elif last['RSI_14'] > 70: sinais['RSI'] = -1
+        else: sinais['RSI'] = 0
+        
+        if last['MACD_12_26_9'] > last['MACDh_12_26_9']: sinais['MACD'] = 1
+        else: sinais['MACD'] = -1
+            
+        if last['Close'] < last['BBL_20_2.0']: sinais['BOLLINGER'] = 1
+        elif last['Close'] > last['BBU_20_2.0']: sinais['BOLLINGER'] = -1
+        else: sinais['BOLLINGER'] = 0
+            
+        if last['EMA_9'] > last['EMA_21']: sinais['EMA'] = 1
+        else: sinais['EMA'] = -1
+
+        # TIER 2
+        if last['ADX_14'] > 25 and last['DMP_14'] > last['DMN_14']: sinais['ADX'] = 1
+        elif last['ADX_14'] > 25 and last['DMN_14'] > last['DMP_14']: sinais['ADX'] = -1
+        else: sinais['ADX'] = 0
+            
+        if last['STOCHk_14_3_3'] < 20: sinais['STOCH'] = 1
+        elif last['STOCHk_14_3_3'] > 80: sinais['STOCH'] = -1
+        else: sinais['STOCH'] = 0
+            
+        if last['Close'] > last['PSARl_0.02_0.2']: sinais['SAR'] = 1
+        else: sinais['SAR'] = -1
+            
+        pesos = {
+            'RSI': 0.20, 'MACD': 0.20, 'BOLLINGER': 0.15, 'EMA': 0.15,
+            'ADX': 0.10, 'STOCH': 0.08, 'SAR': 0.07
+        }
+        
+        score = sum(pesos[ind] * valor for ind, valor in sinais.items())
+        
+        if score > 0.7: sinal_final = "COMPRA FORTE"
+        elif score > 0.2: sinal_final = "COMPRA"
+        elif score < -0.7: sinal_final = "VENDA FORTE"
+        elif score < -0.2: sinal_final = "VENDA"
+        else: sinal_final = "NEUTRO"
+
+        detalhes = f"RSI({last['RSI_14']:.0f}) | MACD({'Alta' if sinais['MACD']==1 else 'Baixa'}) | EMA({'Alta' if sinais['EMA']==1 else 'Baixa'}) | ADX({last['ADX_14']:.0f})"
+        
+        return sinal_final, score, detalhes
+    except Exception as e:
+        return "Erro", 0, f"Erro no cálculo da análise técnica: {e}"
+
+
+def gerar_analise_avancada(row, preco_ativo, vies_fundamental, sinal_tecnico):
+    """Gera uma recomendação de texto para uma opção, integrando todas as análises."""
     diff_percent = row['Diferença (%)']
     tipo = row['Tipo']
     strike = row['Strike']
     
-    # Limites para subvalorização/sobrevalorização
-    UNDERVALUED_THRESHOLD = -20.0 # Preço de mercado 20% mais barato que o teórico
-    OVERVALUED_THRESHOLD = 20.0  # Preço de mercado 20% mais caro que o teórico
-
-    recomendacao_simples = "Preço Justo"
-    detalhe = "O preço de mercado está alinhado com o preço teórico. A decisão de negociar deve se basear em sua estratégia e visão para o ativo."
+    # 1. Análise do Preço da Opção (Derivativos)
+    preco_justo = diff_percent > -20 and diff_percent < 20
+    subvalorizada = diff_percent <= -20
+    sobrevalorizada = diff_percent >= 20
     
-    if diff_percent < UNDERVALUED_THRESHOLD:
-        recomendacao_simples = "Potencial de Compra"
-        detalhe = f"Esta opção está **subvalorizada**. O preço de mercado está **{abs(diff_percent):.1f}% abaixo** do preço teórico. Pode ser uma oportunidade de compra para quem acredita na valorização do prêmio ou na direção do ativo."
-    elif diff_percent > OVERVALUED_THRESHOLD:
-        recomendacao_simples = "Potencial de Venda"
-        detalhe = f"Esta opção está **sobrevalorizada**. O preço de mercado está **{diff_percent:.1f}% acima** do preço teórico. Pode ser uma oportunidade para estratégias de venda (como venda coberta de CALLs) para embolsar um prêmio alto."
+    # 2. Análise de Convergência
+    recomendacao_final = "Aguardar"
+    analise_texto = ""
 
-    # Adiciona contexto sobre o "Moneyness"
-    moneyness = ""
+    # Cenários para CALLs
     if tipo == 'CALL':
-        if strike < preco_ativo: moneyness = "ITM (Dentro do Dinheiro)"
-        elif strike > preco_ativo: moneyness = "OTM (Fora do Dinheiro)"
-        else: moneyness = "ATM (No Dinheiro)"
-    else: # PUT
-        if strike > preco_ativo: moneyness = "ITM (Dentro do Dinheiro)"
-        elif strike < preco_ativo: moneyness = "OTM (Fora do Dinheiro)"
-        else: moneyness = "ATM (No Dinheiro)"
+        if vies_fundamental == "Alta" and "COMPRA" in sinal_tecnico and subvalorizada:
+            recomendacao_final = "Compra Forte de CALL"
+            analise_texto = "Convergência total: O ativo está subvalorizado (fundamentalista), a tendência técnica é de alta e esta opção está barata. Cenário ideal para uma compra de CALL."
+        elif vies_fundamental == "Alta" and "COMPRA" in sinal_tecnico:
+            recomendacao_final = "Compra de CALL"
+            analise_texto = "Sinais alinhados: O viés fundamentalista e técnico são de alta. Embora o preço da opção esteja justo, a direção é favorável. Boa oportunidade para uma compra de CALL."
+        elif vies_fundamental == "Alta" and "VENDA" in sinal_tecnico:
+            recomendacao_final = "Aguardar (Conflito)"
+            analise_texto = "Sinais conflitantes: O ativo está subvalorizado no longo prazo, mas a tendência técnica atual é de baixa. Comprar uma CALL agora seria ir contra a maré. Aguarde a reversão da tendência técnica."
+        else:
+            recomendacao_final = "Não Recomendado"
+            analise_texto = "A operação não é recomendada. O viés fundamentalista e/ou técnico não suporta uma estratégia de alta para esta CALL no momento."
 
-    analise_final = f"**Recomendação:** {recomendacao_simples}\n\n**Análise:** {detalhe}\n\n**Situação:** A opção está **{moneyness}**."
-    return recomendacao_simples, analise_final
+    # Cenários para PUTs
+    if tipo == 'PUT':
+        if vies_fundamental == "Baixa" and "VENDA" in sinal_tecnico and subvalorizada:
+            recomendacao_final = "Compra Forte de PUT"
+            analise_texto = "Convergência total: O ativo está sobrevalorizado (fundamentalista), a tendência técnica é de baixa e esta opção está barata. Cenário ideal para uma compra de PUT."
+        elif vies_fundamental == "Baixa" and "VENDA" in sinal_tecnico:
+            recomendacao_final = "Compra de PUT"
+            analise_texto = "Sinais alinhados: O viés fundamentalista e técnico são de baixa. Embora o preço da opção esteja justo, a direção é favorável. Boa oportunidade para uma compra de PUT."
+        elif vies_fundamental == "Baixa" and "COMPRA" in sinal_tecnico:
+            recomendacao_final = "Aguardar (Conflito)"
+            analise_texto = "Sinais conflitantes: O ativo está sobrevalorizado no longo prazo, mas a tendência técnica atual é de alta. Comprar uma PUT agora seria arriscado. Aguarde a reversão da tendência técnica."
+        else:
+            recomendacao_final = "Não Recomendado"
+            analise_texto = "A operação não é recomendada. O viés fundamentalista e/ou técnico não suporta uma estratégia de baixa para esta PUT no momento."
+
+    return recomendacao_final, analise_texto
 
 
 def ui_black_scholes():
@@ -1541,84 +1628,82 @@ def ui_black_scholes():
     if analisar_opcoes_btn:
         ticker_sa = f"{ticker_selecionado}.SA"
         
-        with st.spinner(f"Buscando dados para {ticker_selecionado}..."):
+        with st.spinner(f"Realizando análise completa para {ticker_selecionado}..."):
             try:
-                # Busca dados de mercado
-                selic_anual = consulta_bc(1178)
-                if selic_anual is None:
-                    st.warning("Não foi possível buscar a SELIC. Usando taxa padrão de 10.5%.")
-                    selic_anual = 0.105
+                # 1. Análise Fundamentalista (Valuation)
+                codigo_cvm_info = ticker_cvm_map_df[ticker_cvm_map_df['TICKER'] == ticker_selecionado]
+                codigo_cvm = int(codigo_cvm_info.iloc[0]['CD_CVM'])
+                demonstrativos = preparar_dados_cvm(CONFIG["HISTORICO_ANOS_CVM"])
+                market_data = obter_dados_mercado(CONFIG["PERIODO_BETA_IBOV"])
+                params_analise = {'taxa_crescimento_perpetuidade': CONFIG["TAXA_CRESCIMENTO_PERPETUIDADE"], 'media_anos_calculo': CONFIG["MEDIA_ANOS_CALCULO"], 'periodo_beta_ibov': CONFIG["PERIODO_BETA_IBOV"]}
+                resultados_valuation, _ = processar_valuation_empresa(ticker_sa, codigo_cvm, demonstrativos, market_data, params_analise)
                 
-                info_ativo = yf.Ticker(ticker_sa).history(period="1d")
-                if info_ativo.empty:
-                    st.error(f"Não foi possível obter o preço atual para {ticker_selecionado}.")
-                    st.stop()
-                preco_atual_ativo = info_ativo['Close'].iloc[-1]
-                st.session_state['preco_atual_ativo_bs'] = preco_atual_ativo # Salva no estado da sessão
+                if resultados_valuation and resultados_valuation['Margem Segurança (%)'] > 15:
+                    vies_fundamental = "Alta"
+                elif resultados_valuation and resultados_valuation['Margem Segurança (%)'] < -15:
+                    vies_fundamental = "Baixa"
+                else:
+                    vies_fundamental = "Neutro"
+                st.session_state['vies_fundamental_bs'] = vies_fundamental
+
+                # 2. Análise Técnica
+                sinal_tecnico, score_tecnico, detalhes_tecnicos = analise_tecnica_ativo(ticker_sa)
+                st.session_state['sinal_tecnico_bs'] = sinal_tecnico
+                st.session_state['detalhes_tecnicos_bs'] = detalhes_tecnicos
+                
+                # 3. Dados de Mercado e Opções
+                selic_anual = market_data[0]
+                preco_atual_ativo = resultados_valuation['Preço Atual (R$)']
+                st.session_state['preco_atual_ativo_bs'] = preco_atual_ativo
                 
                 vol_historica = calcular_volatilidade_historica(ticker_sa)
-                if vol_historica is None:
-                    st.warning("Não foi possível calcular a volatilidade histórica. Usando valor padrão de 30%.")
-                    vol_historica = 0.30
-
-                # Busca cadeia de opções
+                if vol_historica is None: vol_historica = 0.30
+                st.session_state['vol_historica_bs'] = vol_historica
+                
                 vencimento_str = data_vencimento.strftime('%Y-%m-%d')
                 df_opcoes = buscar_opcoes(ticker_selecionado, vencimento_str)
-                
                 if df_opcoes.empty:
                     st.warning(f"Nenhuma opção encontrada para {ticker_selecionado} com vencimento em {data_vencimento.strftime('%d/%m/%Y')}.")
                     st.stop()
+                
+                # 4. Cálculos de Black-Scholes
+                T = (data_vencimento - date.today()).days / 365.0
+                resultados = []
+                for _, row in df_opcoes.iterrows():
+                    preco_bs = black_scholes(preco_atual_ativo, row['strike'], T, selic_anual, vol_historica, row['tipo'])
+                    greeks = calcular_greeks(preco_atual_ativo, row['strike'], T, selic_anual, vol_historica, row['tipo'])
+                    diferenca_percentual = ((row['preco_mercado'] - preco_bs) / preco_bs * 100) if preco_bs > 0 else 0
+                    
+                    res_temp = {'Diferença (%)': diferenca_percentual, 'Tipo': row['tipo'], 'Strike': row['strike']}
+                    recomendacao, analise_detalhada = gerar_analise_avancada(res_temp, preco_atual_ativo, vies_fundamental, sinal_tecnico)
+                    
+                    res = {
+                        'Ticker': row['ticker'], 'Tipo': row['tipo'], 'Strike': row['strike'],
+                        'Preço Mercado': row['preco_mercado'], 'Preço Teórico (BS)': preco_bs,
+                        'Recomendação': recomendacao, 'Análise Detalhada': analise_detalhada,
+                        **greeks
+                    }
+                    resultados.append(res)
+                
+                df_resultados = pd.DataFrame(resultados)
+                st.session_state['df_resultados_bs'] = df_resultados
+
             except Exception as e:
-                st.error(f"Ocorreu um erro durante a busca de dados: {e}")
+                st.error(f"Ocorreu um erro durante a análise completa: {e}")
                 st.stop()
 
-        st.subheader(f"Parâmetros para a Análise de {ticker_selecionado}")
-        col_param1, col_param2, col_param3 = st.columns(3)
-        col_param1.metric("Preço do Ativo (S)", f"R$ {preco_atual_ativo:.2f}")
-        col_param2.metric("Taxa Livre de Risco (r)", f"{selic_anual*100:.2f}% (SELIC)")
+    if 'df_resultados_bs' in st.session_state:
+        st.subheader("Diagnóstico do Ativo Subjacente")
+        vies_fundamental = st.session_state.get('vies_fundamental_bs', "N/A")
+        sinal_tecnico = st.session_state.get('sinal_tecnico_bs', "N/A")
+        detalhes_tecnicos = st.session_state.get('detalhes_tecnicos_bs', "N/A")
         
-        # Slider para o usuário ajustar a volatilidade
-        vol_ajustada = col_param3.slider("Volatilidade Anual (σ)", min_value=0.01, max_value=2.0, value=vol_historica, step=0.01, format="%.2f")
-        
+        col1, col2 = st.columns(2)
+        col1.metric("Viés Fundamentalista (Valuation)", vies_fundamental)
+        col2.metric("Sinal Técnico (Curto Prazo)", sinal_tecnico, help=detalhes_tecnicos)
         st.divider()
 
-        with st.spinner("Calculando preços e gerando análises..."):
-            T = (data_vencimento - date.today()).days / 365.0
-            
-            resultados = []
-            for _, row in df_opcoes.iterrows():
-                preco_bs = black_scholes(preco_atual_ativo, row['strike'], T, selic_anual, vol_ajustada, row['tipo'])
-                greeks = calcular_greeks(preco_atual_ativo, row['strike'], T, selic_anual, vol_ajustada, row['tipo'])
-                
-                diferenca_percentual = ((row['preco_mercado'] - preco_bs) / preco_bs * 100) if preco_bs > 0 else 0
-                
-                res_temp = {
-                    'Diferença (%)': diferenca_percentual,
-                    'Tipo': row['tipo'],
-                    'Strike': row['strike']
-                }
-                
-                recomendacao, analise_detalhada = gerar_analise_avancada(res_temp, preco_atual_ativo)
-
-                res = {
-                    'Ticker': row['ticker'],
-                    'Tipo': row['tipo'],
-                    'Strike': row['strike'],
-                    'Preço Mercado': row['preco_mercado'],
-                    'Preço Teórico (BS)': preco_bs,
-                    'Recomendação': recomendacao,
-                    'Análise Detalhada': analise_detalhada,
-                    'Delta': greeks['delta'], 'Gamma': greeks['gamma'], 'Vega': greeks['vega'],
-                    'Theta': greeks['theta'], 'Rho': greeks['rho']
-                }
-                resultados.append(res)
-            
-            df_resultados = pd.DataFrame(resultados)
-            st.session_state['df_resultados_bs'] = df_resultados
-
-    if 'df_resultados_bs' in st.session_state:
         df_resultados = st.session_state['df_resultados_bs']
-        # Recupera o preço do ativo do estado da sessão para evitar o erro
         preco_atual_ativo = st.session_state.get('preco_atual_ativo_bs', 0)
         
         st.subheader("Resultados da Análise de Opções")
@@ -1628,7 +1713,7 @@ def ui_black_scholes():
 
         tab_calls, tab_puts = st.tabs(["Opções de Compra (Calls)", "Opções de Venda (Puts)"])
 
-        def exibir_tabela_e_analise(df, preco_ativo, tipo_opcao):
+        def exibir_tabela_e_analise(df, tipo_opcao):
             if df.empty:
                 st.info(f"Nenhuma opção de {tipo_opcao} encontrada para este vencimento.")
                 return
@@ -1653,13 +1738,13 @@ def ui_black_scholes():
             if opcoes_disponiveis:
                 opcao_selecionada = st.selectbox("Selecione uma opção para ver a análise completa:", options=opcoes_disponiveis, key=f"select_{tipo_opcao}")
                 analise = df[df['Ticker'] == opcao_selecionada]['Análise Detalhada'].iloc[0]
-                st.info(analise)
+                st.success(analise)
 
         with tab_calls:
-            exibir_tabela_e_analise(df_calls, preco_atual_ativo, "CALL")
+            exibir_tabela_e_analise(df_calls, "CALL")
 
         with tab_puts:
-            exibir_tabela_e_analise(df_puts, preco_atual_ativo, "PUT")
+            exibir_tabela_e_analise(df_puts, "PUT")
         
         with st.expander("📖 Glossário das Gregas (O que significam?)"):
             st.markdown("""
