@@ -5,10 +5,12 @@ analise_financeira_app.py
 Este script implementa um aplicativo web interativo usando a biblioteca Streamlit
 para análise financeira, incluindo controle de finanças pessoais, valuation de
 empresas, modelos de saúde financeira (Fleuriet e Z-Score) e precificação de
-opções pelo modelo de Black-Scholes.
+opções pelo modelo de Black-Scholes com análise avançada.
 
 O código foi revisado com base em um TCC sobre valuation que utiliza os modelos
 EVA e EFV, bem como o modelo de Hamada para ajuste do beta.
+Versão 3: Adiciona análise de recomendação em Black-Scholes e melhora o CSS
+para temas claro e escuro.
 """
 
 import os
@@ -35,107 +37,128 @@ warnings.filterwarnings('ignore')
 # ==============================================================================
 st.set_page_config(layout="wide", page_title="Painel de Controle Financeiro", page_icon="📈")
 
-# Estilo CSS para um tema escuro e profissional com efeito Neon
+# Estilo CSS aprimorado para temas claro e escuro, com melhor UX
 st.markdown("""
 <style>
-    /* Paleta de Cores Neon Profissional (Contraste Aprimorado V4) */
+    /* 1. Definição de Variáveis de Cor para Tema Claro (Padrão) */
     :root {
-        --primary-bg: #0A0A1A; /* Fundo carvão profundo, quase preto */
-        --secondary-bg: #1A1A2E; /* Fundo secundário azul/roxo escuro */
-        --widget-bg: #16213E; /* Fundo dos widgets */
-        --primary-accent: #00F6FF; /* Ciano neon vibrante (mantido) */
-        --secondary-accent: #39FF14; /* Verde neon para contraste */
-        --positive-accent: #00FF87; /* Verde neon (mantido) */
-        --text-color: #F8F9FA; /* Branco quase puro para melhor legibilidade */
-        --header-color: #FFFFFF; /* Branco puro para títulos e labels importantes */
-        --border-color: #5372F0; /* Borda azul sutil */
-        --tab-active-bg: #323A52; /* Fundo escuro para a aba ativa */
-        --tab-inactive-text: #A0A4B8; /* Cor para texto de abas inativas */
+        --primary-bg: #F0F2F6;
+        --secondary-bg: #FFFFFF;
+        --widget-bg: #FFFFFF;
+        --primary-accent: #007BFF;
+        --secondary-accent: #28a745;
+        --positive-accent: #28a745;
+        --negative-accent: #DC3545;
+        --text-color: #212529;
+        --header-color: #000000;
+        --border-color: #DEE2E6;
+        --tab-active-bg: #E9ECEF;
+        --tab-inactive-text: #6C757D;
     }
 
+    /* 2. Sobrescrita das Variáveis para Tema Escuro */
+    [data-theme="dark"] {
+        --primary-bg: #0A0A1A;
+        --secondary-bg: #1A1A2E;
+        --widget-bg: #16213E;
+        --primary-accent: #00F6FF;
+        --secondary-accent: #39FF14;
+        --positive-accent: #00FF87;
+        --negative-accent: #FF5252;
+        --text-color: #F8F9FA;
+        --header-color: #FFFFFF;
+        --border-color: #5372F0;
+        --tab-active-bg: #323A52;
+        --tab-inactive-text: #A0A4B8;
+    }
+
+    /* 3. Estilos Gerais que usam as variáveis (funcionam para ambos os temas) */
     body {
         color: var(--text-color);
         background-color: var(--primary-bg);
     }
 
-   .main.block-container {
+    .main.block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
     }
     
-    /* Título com Gradiente Neon */
-    h1 {
+    h1, h2, h3 {
+        color: var(--header-color);
+    }
+
+    /* Título com Gradiente Adaptativo */
+    [data-theme="light"] h1 {
+        background: -webkit-linear-gradient(45deg, #007BFF, #0056b3);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    [data-theme="dark"] h1 {
         background: -webkit-linear-gradient(45deg, var(--primary-accent), var(--positive-accent));
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         text-shadow: 0 0 10px rgba(0, 246, 255, 0.3);
     }
-    
-    h2, h3 {
-        color: var(--header-color);
-    }
 
-    /* Abas com Efeito Neon */
-   .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
-    }
-   .stTabs [data-baseweb="tab"] {
+    /* Abas */
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] {
         height: 50px;
         background-color: transparent;
-        border-bottom: 2px solid var(--secondary-bg);
+        border-bottom: 2px solid transparent;
         transition: all 0.3s;
-        color: var(--text-color);
+        color: var(--tab-inactive-text);
     }
-    .stTabs [data-baseweb="tab"] > div {
-        color: var(--tab-inactive-text); /* Corrigindo o contraste para as abas inativas */
-    }
-   .stTabs [aria-selected="true"] {
+    .stTabs [aria-selected="true"] {
         color: var(--primary-accent);
         border-bottom: 2px solid var(--primary-accent);
-        box-shadow: 0 2px 15px -5px var(--primary-accent);
         background-color: var(--tab-active-bg);
     }
+    [data-theme="dark"] .stTabs [aria-selected="true"] {
+        box-shadow: 0 2px 15px -5px var(--primary-accent);
+    }
 
-    /* Métricas com Borda Neon Sutil e Texto Branco */
-   .stMetric {
-        border: 1px solid var(--secondary-bg);
+    /* Métricas */
+    .stMetric {
+        border: 1px solid var(--border-color);
         border-radius: 8px;
         padding: 20px;
         background-color: var(--secondary-bg);
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+    }
+    [data-theme="dark"] .stMetric {
         box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
     }
-   .stMetric label { /* Rótulo da métrica (ex: "Saldo") */
-        color: var(--text-color);
+    .stMetric label { color: var(--text-color); }
+    .stMetric > div[data-testid="stMetricValue"] { color: var(--header-color) !important; }
+    .stMetric > div[data-testid="stMetricDelta"] > div[data-testid="stMetricDelta"] {
+        color: var(--positive-accent) !important;
     }
-   .stMetric > div:nth-child(2) { /* O valor da métrica */
-        color: var(--header-color);
+    .stMetric > div[data-testid="stMetricDelta"] > div[data-testid="stMetricDelta"].st-ae {
+        color: var(--negative-accent) !important;
     }
-   .stMetric > div[data-testid="stMetricValue"] {
-        color: var(--header-color) !important;
-   }
-   .stMetric > div[data-testid="stMetricDelta"] {
-        color: var(--positive-accent) !important; /* Corrigido para verde neon */
-   }
 
-    /* Botões com Efeito Neon */
-   .stButton > button {
+
+    /* Botões */
+    .stButton > button {
         border-radius: 8px;
         border: 1px solid var(--primary-accent);
         background-color: transparent;
         color: var(--primary-accent);
         transition: all 0.3s ease-in-out;
+    }
+    .stButton > button:hover {
+        background-color: var(--primary-accent);
+        color: var(--secondary-bg);
+    }
+    [data-theme="dark"] .stButton > button {
         box-shadow: 0 0 5px var(--primary-accent);
     }
-   .stButton > button:hover {
-        background-color: var(--primary-accent);
-        color: var(--primary-bg);
+    [data-theme="dark"] .stButton > button:hover {
         box-shadow: 0 0 20px var(--primary-accent);
     }
-   .stButton > button:active {
-        transform: scale(0.98);
-    }
 
-    /* Expanders e Formulário com Texto Branco */
+    /* Expanders e Formulários */
     [data-testid="stExpander"] {
         background-color: var(--secondary-bg);
         border: 1px solid var(--border-color);
@@ -147,36 +170,9 @@ st.markdown("""
         color: var(--header-color) !important;
     }
     
-    /* Corrigindo a cor do texto no expander, data_editor e tabela */
-    [data-testid="stExpander"] p, 
-    [data-testid="stExpander"] .stMarkdown,
-    .stTable, .stDataFrame {
+    /* Cor do texto geral */
+    .stMarkdown, .stTable, .stDataFrame, .stSelectbox label, .stDateInput label, .stNumberInput label, .stTextInput label {
         color: var(--text-color);
-    }
-    .stSelectbox label, .stDateInput label, .stNumberInput label, .stTextInput label {
-        color: var(--text-color);
-    }
-    
-    /* Legendas dos gráficos e labels de eixos */
-    .g-gtitle, .g-xtitle, .g-ytitle, .g-legend-title {
-        fill: var(--text-color) !important; /* Corrigindo a cor dos títulos dos gráficos */
-    }
-    .xtick, .ytick {
-        fill: var(--text-color) !important; /* Corrigindo a cor dos eixos */
-    }
-    .xtick line, .ytick line {
-        stroke: var(--text-color) !important; /* Corrigindo a cor das linhas dos eixos */
-    }
-    .legendtoggle {
-        fill: var(--text-color) !important; /* Corrigindo a cor das legendas */
-    }
-
-    /* Melhoria específica para a tabela de direcionadores de valor */
-    .stTable div[role="cell"] {
-        color: var(--text-color);
-    }
-    .stTable thead th {
-        color: var(--header-color);
     }
 </style>""", unsafe_allow_html=True)
 
@@ -1444,10 +1440,44 @@ def calcular_greeks(S, K, T, r, sigma, option_type="call"):
         
     return greeks
 
+def gerar_analise_avancada(row, preco_ativo):
+    """Gera uma recomendação de texto para uma opção."""
+    diff_percent = row['Diferença (%)']
+    tipo = row['Tipo']
+    strike = row['Strike']
+    
+    # Limites para subvalorização/sobrevalorização
+    UNDERVALUED_THRESHOLD = -20.0 # Preço de mercado 20% mais barato que o teórico
+    OVERVALUED_THRESHOLD = 20.0  # Preço de mercado 20% mais caro que o teórico
+
+    recomendacao_simples = "Preço Justo"
+    detalhe = "O preço de mercado está alinhado com o preço teórico. A decisão de negociar deve se basear em sua estratégia e visão para o ativo."
+    
+    if diff_percent < UNDERVALUED_THRESHOLD:
+        recomendacao_simples = "Potencial de Compra"
+        detalhe = f"Esta opção está **subvalorizada**. O preço de mercado está **{abs(diff_percent):.1f}% abaixo** do preço teórico. Pode ser uma oportunidade de compra para quem acredita na valorização do prêmio ou na direção do ativo."
+    elif diff_percent > OVERVALUED_THRESHOLD:
+        recomendacao_simples = "Potencial de Venda"
+        detalhe = f"Esta opção está **sobrevalorizada**. O preço de mercado está **{diff_percent:.1f}% acima** do preço teórico. Pode ser uma oportunidade para estratégias de venda (como venda coberta de CALLs) para embolsar um prêmio alto."
+
+    # Adiciona contexto sobre o "Moneyness"
+    moneyness = ""
+    if tipo == 'CALL':
+        if strike < preco_ativo: moneyness = "ITM (Dentro do Dinheiro)"
+        elif strike > preco_ativo: moneyness = "OTM (Fora do Dinheiro)"
+        else: moneyness = "ATM (No Dinheiro)"
+    else: # PUT
+        if strike > preco_ativo: moneyness = "ITM (Dentro do Dinheiro)"
+        elif strike < preco_ativo: moneyness = "OTM (Fora do Dinheiro)"
+        else: moneyness = "ATM (No Dinheiro)"
+
+    analise_final = f"**Recomendação:** {recomendacao_simples}\n\n**Análise:** {detalhe}\n\n**Situação:** A opção está **{moneyness}**."
+    return recomendacao_simples, analise_final
+
 
 def ui_black_scholes():
     """Renderiza a interface da aba Black-Scholes."""
-    st.header("Precificação de Opções (Black-Scholes)")
+    st.header("Precificação de Opções e Análise Avançada")
     
     ticker_cvm_map_df = carregar_mapeamento_ticker_cvm()
     lista_tickers = sorted(ticker_cvm_map_df['TICKER'].unique())
@@ -1506,8 +1536,7 @@ def ui_black_scholes():
         
         st.divider()
 
-        with st.spinner("Calculando preços e Greeks..."):
-            # Cálculos
+        with st.spinner("Calculando preços e gerando análises..."):
             T = (data_vencimento - date.today()).days / 365.0
             
             resultados = []
@@ -1515,62 +1544,86 @@ def ui_black_scholes():
                 preco_bs = black_scholes(preco_atual_ativo, row['strike'], T, selic_anual, vol_ajustada, row['tipo'])
                 greeks = calcular_greeks(preco_atual_ativo, row['strike'], T, selic_anual, vol_ajustada, row['tipo'])
                 
+                diferenca_percentual = ((row['preco_mercado'] - preco_bs) / preco_bs * 100) if preco_bs > 0 else 0
+                
+                res_temp = {
+                    'Diferença (%)': diferenca_percentual,
+                    'Tipo': row['tipo'],
+                    'Strike': row['strike']
+                }
+                
+                recomendacao, analise_detalhada = gerar_analise_avancada(res_temp, preco_atual_ativo)
+
                 res = {
                     'Ticker': row['ticker'],
                     'Tipo': row['tipo'],
                     'Strike': row['strike'],
                     'Preço Mercado': row['preco_mercado'],
                     'Preço Teórico (BS)': preco_bs,
-                    'Diferença (R$)': row['preco_mercado'] - preco_bs,
-                    'Diferença (%)': ((row['preco_mercado'] - preco_bs) / preco_bs * 100) if preco_bs > 0 else 0,
-                    'Delta': greeks['delta'],
-                    'Gamma': greeks['gamma'],
-                    'Vega': greeks['vega'],
-                    'Theta': greeks['theta'],
-                    'Rho': greeks['rho']
+                    'Recomendação': recomendacao,
+                    'Análise Detalhada': analise_detalhada,
+                    'Delta': greeks['delta'], 'Gamma': greeks['gamma'], 'Vega': greeks['vega'],
+                    'Theta': greeks['theta'], 'Rho': greeks['rho']
                 }
                 resultados.append(res)
             
             df_resultados = pd.DataFrame(resultados)
+            st.session_state['df_resultados_bs'] = df_resultados
 
-        st.subheader("Resultados da Análise")
+    if 'df_resultados_bs' in st.session_state:
+        df_resultados = st.session_state['df_resultados_bs']
+        st.subheader("Resultados da Análise de Opções")
         
         df_calls = df_resultados[df_resultados['Tipo'] == 'CALL'].copy()
         df_puts = df_resultados[df_resultados['Tipo'] == 'PUT'].copy()
 
         tab_calls, tab_puts = st.tabs(["Opções de Compra (Calls)", "Opções de Venda (Puts)"])
 
-        def formatar_df(df, preco_ativo):
-            df['Moneyness'] = np.where(df['Tipo'] == 'CALL',
-                                    np.where(df['Strike'] < preco_ativo, 'ITM', np.where(df['Strike'] == preco_ativo, 'ATM', 'OTM')),
-                                    np.where(df['Strike'] > preco_ativo, 'ITM', np.where(df['Strike'] == preco_ativo, 'ATM', 'OTM')))
+        def exibir_tabela_e_analise(df, preco_ativo, tipo_opcao):
+            if df.empty:
+                st.info(f"Nenhuma opção de {tipo_opcao} encontrada para este vencimento.")
+                return
+
+            st.dataframe(df[['Ticker', 'Strike', 'Preço Mercado', 'Preço Teórico (BS)', 'Recomendação', 'Delta', 'Vega', 'Theta']],
+                         use_container_width=True, hide_index=True,
+                         column_config={
+                             "Strike": st.column_config.NumberColumn("Strike", format="R$ %.2f"),
+                             "Preço Mercado": st.column_config.NumberColumn("Preço Mercado", format="R$ %.4f"),
+                             "Preço Teórico (BS)": st.column_config.NumberColumn("Preço Teórico", format="R$ %.4f"),
+                             "Delta": st.column_config.NumberColumn(format="%.3f"),
+                             "Vega": st.column_config.NumberColumn(format="%.3f"),
+                             "Theta": st.column_config.NumberColumn(format="%.3f"),
+                         })
             
-            # Reordenar colunas
-            cols = ['Ticker', 'Strike', 'Moneyness', 'Preço Mercado', 'Preço Teórico (BS)', 'Diferença (R$)', 'Diferença (%)', 'Delta', 'Gamma', 'Vega', 'Theta', 'Rho']
-            df = df[cols]
+            st.markdown("---")
+            st.markdown("#### 🔍 Análise Detalhada da Opção")
             
-            return st.dataframe(df, use_container_width=True, hide_index=True,
-                                column_config={
-                                    "Strike": st.column_config.NumberColumn(format="R$ %.2f"),
-                                    "Preço Mercado": st.column_config.NumberColumn(format="R$ %.4f"),
-                                    "Preço Teórico (BS)": st.column_config.NumberColumn(format="R$ %.4f"),
-                                    "Diferença (R$)": st.column_config.NumberColumn(format="R$ %.4f"),
-                                    "Diferença (%)": st.column_config.NumberColumn(format="%.2f%%"),
-                                    "Delta": st.column_config.NumberColumn(format="%.4f"),
-                                    "Gamma": st.column_config.NumberColumn(format="%.4f"),
-                                    "Vega": st.column_config.NumberColumn(format="%.4f"),
-                                    "Theta": st.column_config.NumberColumn(format="%.4f"),
-                                    "Rho": st.column_config.NumberColumn(format="%.4f"),
-                                })
+            opcoes_disponiveis = df['Ticker'].tolist()
+            if opcoes_disponiveis:
+                opcao_selecionada = st.selectbox("Selecione uma opção para ver a análise completa:", options=opcoes_disponiveis, key=f"select_{tipo_opcao}")
+                analise = df[df['Ticker'] == opcao_selecionada]['Análise Detalhada'].iloc[0]
+                st.info(analise)
 
         with tab_calls:
-            st.info("ITM (In-the-Money): Strike < Preço do Ativo | ATM (At-the-Money): Strike ≈ Preço do Ativo | OTM (Out-of-the-Money): Strike > Preço do Ativo")
-            formatar_df(df_calls, preco_atual_ativo)
+            exibir_tabela_e_analise(df_calls, preco_atual_ativo, "CALL")
 
         with tab_puts:
-            st.info("ITM (In-the-Money): Strike > Preço do Ativo | ATM (At-the-Money): Strike ≈ Preço do Ativo | OTM (Out-of-the-Money): Strike < Preço do Ativo")
-            formatar_df(df_puts, preco_atual_ativo)
+            exibir_tabela_e_analise(df_puts, preco_atual_ativo, "PUT")
+        
+        with st.expander("📖 Glossário das Gregas (O que significam?)"):
+            st.markdown("""
+            As "Greeks" (Gregas) medem a sensibilidade do preço de uma opção a diferentes fatores. Entendê-las ajuda a gerenciar o risco.
 
+            - **Delta (Δ):** Mede o quanto o preço da opção muda para cada R$ 1,00 de mudança no preço do ativo. Varia de 0 a 1 para Calls e -1 a 0 para Puts. Um Delta de 0.60 significa que a opção valoriza R$ 0,60 se o ativo subir R$ 1,00.
+
+            - **Gamma (Γ):** Mede a taxa de variação do Delta. Indica o quão rápido o Delta muda. Um Gamma alto significa que o Delta é muito sensível a mudanças no preço do ativo, o que é comum em opções "ATM" (no dinheiro).
+
+            - **Vega (ν):** Mede a sensibilidade do preço da opção a uma mudança de 1% na volatilidade do ativo. Se você acredita que a volatilidade vai aumentar, procure opções com Vega positivo e alto.
+
+            - **Theta (Θ):** Mede a perda de valor da opção com a passagem do tempo (decaimento temporal). É quase sempre negativo, indicando que, a cada dia que passa, a opção perde um pouco de seu valor, mantendo os outros fatores constantes.
+
+            - **Rho (ρ):** Mede a sensibilidade do preço da opção a uma mudança de 1% na taxa de juros livre de risco. Geralmente tem um impacto menor no preço de opções de curto prazo.
+            """)
 
 # ==============================================================================
 # ESTRUTURA PRINCIPAL DO APP
