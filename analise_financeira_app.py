@@ -1492,7 +1492,7 @@ def analise_tecnica_ativo(ticker):
     try:
         df = yf.download(ticker, period="1y", progress=False)
         if df.empty:
-            return "Dados Insuficientes", 0, "Não foi possível obter dados para a análise técnica."
+            return "Dados Insuficientes", 0, {}, "Não foi possível obter dados para a análise técnica."
         
         # Adiciona todos os indicadores ao DataFrame
         df.ta.rsi(append=True)
@@ -1506,53 +1506,72 @@ def analise_tecnica_ativo(ticker):
         df.dropna(inplace=True)
 
         if df.empty:
-            return "Dados Insuficientes", 0, "Não foi possível calcular os indicadores técnicos."
+            return "Dados Insuficientes", 0, {}, "Não foi possível calcular os indicadores técnicos."
 
         # Pega o último valor de cada indicador
         last = df.iloc[-1]
         
         sinais = {}
+        valores_indicadores = {}
+
         # TIER 1
         try:
-            if last['RSI_14'] < 30: sinais['RSI'] = 1
-            elif last['RSI_14'] > 70: sinais['RSI'] = -1
+            rsi_val = last['RSI_14']
+            valores_indicadores['RSI'] = f"{rsi_val:.1f}"
+            if rsi_val < 30: sinais['RSI'] = 1
+            elif rsi_val > 70: sinais['RSI'] = -1
             else: sinais['RSI'] = 0
-        except KeyError: sinais['RSI'] = 0
+        except (KeyError, TypeError): sinais['RSI'] = 0; valores_indicadores['RSI'] = "Erro"
 
         try:
+            valores_indicadores['MACD'] = f"{last['MACD_12_26_9']:.2f}"
             if last['MACD_12_26_9'] > last['MACDs_12_26_9']: sinais['MACD'] = 1
             else: sinais['MACD'] = -1
-        except KeyError: sinais['MACD'] = 0
+        except (KeyError, TypeError): sinais['MACD'] = 0; valores_indicadores['MACD'] = "Erro"
             
         try:
+            valores_indicadores['Bandas de Bollinger'] = f"{last['BBP_20_2.0']:.2f}"
             if last['Close'] < last['BBL_20_2.0']: sinais['BOLLINGER'] = 1
             elif last['Close'] > last['BBU_20_2.0']: sinais['BOLLINGER'] = -1
             else: sinais['BOLLINGER'] = 0
-        except KeyError: sinais['BOLLINGER'] = 0
+        except (KeyError, TypeError): sinais['BOLLINGER'] = 0; valores_indicadores['Bandas de Bollinger'] = "Erro"
             
         try:
+            valores_indicadores['EMA (9 vs 21)'] = "Cruz. Alta" if last['EMA_9'] > last['EMA_21'] else "Cruz. Baixa"
             if last['EMA_9'] > last['EMA_21']: sinais['EMA'] = 1
             else: sinais['EMA'] = -1
-        except KeyError: sinais['EMA'] = 0
+        except (KeyError, TypeError): sinais['EMA'] = 0; valores_indicadores['EMA (9 vs 21)'] = "Erro"
 
         # TIER 2
         try:
-            if last['ADX_14'] > 25 and last['DMP_14'] > last['DMN_14']: sinais['ADX'] = 1
-            elif last['ADX_14'] > 25 and last['DMN_14'] > last['DMP_14']: sinais['ADX'] = -1
+            adx_val = last['ADX_14']
+            valores_indicadores['ADX'] = f"{adx_val:.1f}"
+            if adx_val > 25 and last['DMP_14'] > last['DMN_14']: sinais['ADX'] = 1
+            elif adx_val > 25 and last['DMN_14'] > last['DMP_14']: sinais['ADX'] = -1
             else: sinais['ADX'] = 0
-        except KeyError: sinais['ADX'] = 0
+        except (KeyError, TypeError): sinais['ADX'] = 0; valores_indicadores['ADX'] = "Erro"
             
         try:
-            if last['STOCHk_14_3_3'] < 20: sinais['STOCH'] = 1
-            elif last['STOCHk_14_3_3'] > 80: sinais['STOCH'] = -1
+            stoch_val = last['STOCHk_14_3_3']
+            valores_indicadores['Estocástico'] = f"{stoch_val:.1f}"
+            if stoch_val < 20: sinais['STOCH'] = 1
+            elif stoch_val > 80: sinais['STOCH'] = -1
             else: sinais['STOCH'] = 0
-        except KeyError: sinais['STOCH'] = 0
+        except (KeyError, TypeError): sinais['STOCH'] = 0; valores_indicadores['Estocástico'] = "Erro"
             
         try:
-            if not pd.isna(last['PSARl_0.02_0.2']): sinais['SAR'] = 1
-            elif not pd.isna(last['PSARs_0.02_0.2']): sinais['SAR'] = -1
-            else: sinais['SAR'] = 0
-        except KeyError: sinais['SAR'] = 0
+            if not pd.isna(last['PSARl_0.02_0.2']): 
+                sinais['SAR'] = 1
+                valores_indicadores['SAR Parabólico'] = "Alta"
+            elif not pd.isna(last['PSARs_0.02_0.2']): 
+                sinais['SAR'] = -1
+                valores_indicadores['SAR Parabólico'] = "Baixa"
+            else: 
+                sinais['SAR'] = 0
+                valores_indicadores['SAR Parabólico'] = "Neutro"
+        except (KeyError, TypeError): 
+            sinais['SAR'] = 0
+            valores_indicadores['SAR Parabólico'] = "Erro"
             
         pesos = {
             'RSI': 0.20, 'MACD': 0.20, 'BOLLINGER': 0.15, 'EMA': 0.15,
@@ -1567,17 +1586,14 @@ def analise_tecnica_ativo(ticker):
         elif score < -0.2: sinal_final = "VENDA"
         else: sinal_final = "NEUTRO"
 
-        detalhes = f"RSI({last.get('RSI_14', 0):.0f}) | MACD({'Alta' if sinais.get('MACD', 0)==1 else 'Baixa'}) | EMA({'Alta' if sinais.get('EMA', 0)==1 else 'Baixa'}) | ADX({last.get('ADX_14', 0):.0f})"
-        
-        return sinal_final, score, detalhes
+        return sinal_final, score, valores_indicadores
     except Exception as e:
-        return "Erro", 0, f"Erro no cálculo da análise técnica: {e}"
+        return "Erro", 0, {}, f"Erro no cálculo da análise técnica: {e}"
 
-def gerar_analise_avancada(row, preco_ativo, vies_fundamental, sinal_tecnico):
+def gerar_analise_avancada(row, vies_fundamental, sinal_tecnico):
     """Gera uma recomendação de texto para uma opção, integrando todas as análises."""
     diff_percent = row['Diferença (%)']
     tipo = row['Tipo']
-    strike = row['Strike']
     
     # 1. Análise do Preço da Opção (Derivativos)
     subvalorizada = diff_percent <= -20
@@ -1708,15 +1724,18 @@ def ui_black_scholes():
         st.subheader("Diagnóstico do Ativo Subjacente")
         vies_fundamental = st.session_state.get('vies_fundamental_bs', "N/A")
         sinal_tecnico = st.session_state.get('sinal_tecnico_bs', "N/A")
-        detalhes_tecnicos = st.session_state.get('detalhes_tecnicos_bs', "N/A")
+        detalhes_tecnicos = st.session_state.get('detalhes_tecnicos_bs', {})
         
         col1, col2 = st.columns(2)
         col1.metric("Viés Fundamentalista (Valuation)", vies_fundamental)
-        col2.metric("Sinal Técnico (Curto Prazo)", sinal_tecnico, help=detalhes_tecnicos)
+        col2.metric("Sinal Técnico (Curto Prazo)", sinal_tecnico)
+
+        with st.expander("Detalhes da Análise Técnica"):
+            st.table(pd.DataFrame.from_dict(detalhes_tecnicos, orient='index', columns=['Valor/Sinal']))
+        
         st.divider()
 
         df_resultados = st.session_state['df_resultados_bs']
-        preco_atual_ativo = st.session_state.get('preco_atual_ativo_bs', 0)
         
         st.subheader("Resultados da Análise de Opções")
         
