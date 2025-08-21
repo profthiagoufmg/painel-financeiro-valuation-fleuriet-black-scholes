@@ -1509,6 +1509,7 @@ def ui_black_scholes():
                     st.error(f"Não foi possível obter o preço atual para {ticker_selecionado}.")
                     st.stop()
                 preco_atual_ativo = info_ativo['Close'].iloc[-1]
+                st.session_state['preco_atual_ativo_bs'] = preco_atual_ativo # Salva no estado da sessão
                 
                 vol_historica = calcular_volatilidade_historica(ticker_sa)
                 if vol_historica is None:
@@ -1572,6 +1573,9 @@ def ui_black_scholes():
 
     if 'df_resultados_bs' in st.session_state:
         df_resultados = st.session_state['df_resultados_bs']
+        # Recupera o preço do ativo do estado da sessão para evitar o erro
+        preco_atual_ativo = st.session_state.get('preco_atual_ativo_bs', 0)
+        
         st.subheader("Resultados da Análise de Opções")
         
         df_calls = df_resultados[df_resultados['Tipo'] == 'CALL'].copy()
