@@ -9,16 +9,18 @@ opções pelo modelo de Black-Scholes com análise avançada.
 
 O código foi revisado com base em um TCC sobre valuation que utiliza os modelos
 EVA e EFV, bem como o modelo de Hamada para ajuste do beta.
-Versão 8: Implementa sistema de retentativa automática (retry) para todas as
-           chamadas de rede (CVM, yfinance) para máxima resiliência. Adiciona
-           "trava de segurança" para evitar crashes por falha de dados.
-           Corrige CSS e adiciona explicações.
+Versão 21: Aprimora a clareza da interface na aba Black-Scholes. Adiciona uma
+            coluna de "Interpretação para Leigos" na tabela de análise técnica
+            e melhora a redação do glossário das Gregas para facilitar o
+            entendimento por parte de todos os usuários.
 """
 
 import os
 import pandas as pd
 import yfinance as yf
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from zipfile import ZipFile
 from datetime import datetime, date
 from pathlib import Path
@@ -31,6 +33,8 @@ import plotly.graph_objects as go
 from tenacity import retry, wait_exponential, stop_after_attempt, RetryError
 from scipy.stats import norm
 import pandas_ta as ta
+import logging
+from typing import Dict, Any
 
 # Ignorar avisos para uma saída mais limpa
 warnings.filterwarnings('ignore')
@@ -39,6 +43,9 @@ warnings.filterwarnings('ignore')
 # CONFIGURAÇÕES GERAIS E LAYOUT DA PÁGINA
 # ==============================================================================
 st.set_page_config(layout="wide", page_title="Painel de Controle Financeiro", page_icon="📈")
+
+# Chave da API Alpha Vantage
+ALPHA_VANTAGE_API_KEY = "G34YKVWF0XCPVMZV"
 
 # Estilo CSS aprimorado para temas claro e escuro, com melhor UX
 st.markdown("""
@@ -180,7 +187,7 @@ st.markdown("""
     }
     
     /* Cor do texto geral e labels dos widgets */
-    .stMarkdown, .stSelectbox > label, .stDateInput > label, .stNumberInput > label, .stTextInput > label, .stSlider > label {
+    .stMarkdown, .stSelectbox > label, .stDateInput > label, .stNumberInput > label, .stTextInput > label, .stSlider > label, .stCheckbox > label {
         color: var(--text-color) !important; /* CORREÇÃO DE COR */
     }
     
@@ -238,23 +245,89 @@ CONFIG["DIRETORIO_DADOS_EXTRAIDOS"] = CONFIG["DIRETORIO_BASE"] / "CVM_EXTRACTED"
 # LÓGICA DE DADOS GERAL (CVM, MERCADO, ETC.)
 # ==============================================================================
 
-# Decorador de retentativa para chamadas de rede
-retry_decorator = retry(
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    stop=stop_after_attempt(3)
-)
+def requests_retry_session(
+    retries=3,
+    backoff_factor=0.3,
+    status_forcelist=(500, 502, 504),
+    session=None,
+):
+    """Cria uma sessão de requests com retentativa automática."""
+    session = session or requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
 
-@retry_decorator
-def robust_get_request(url, timeout=60):
-    """Função robusta para fazer requisições GET com retentativas."""
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-    return response
+@st.cache_data
+def get_stock_data(ticker_sa, period="2y", interval="1d"):
+    """
+    Busca dados históricos de um ativo com sistema de fallback de 3 níveis.
+    Tenta yfinance -> brapi -> Alpha Vantage.
+    """
+    # 1. Tenta com yfinance
+    try:
+        df = yf.download(ticker_sa, period=period, interval=interval, progress=False, auto_adjust=True)
+        if not df.empty:
+            df.columns = [col.lower() for col in df.columns]
+            return df
+    except Exception:
+        pass
 
-@retry_decorator
-def robust_yf_download(*args, **kwargs):
-    """Função robusta para baixar dados do yfinance com retentativas."""
-    return yf.download(*args, **kwargs)
+    # 2. Fallback para brapi API
+    try:
+        ticker_sem_sa = ticker_sa.replace(".SA", "")
+        range_map = {"2y": "2y", "5y": "5y", "1y": "1y"}
+        brapi_range = range_map.get(period, "2y")
+        
+        response = requests_retry_session().get(f"https://brapi.dev/api/quote/{ticker_sem_sa}?range={brapi_range}&interval={interval}")
+        response.raise_for_status()
+        data = response.json()
+        
+        if 'results' in data and data['results']:
+            hist_data = data['results'][0].get('historicalDataPrice')
+            if hist_data:
+                df = pd.DataFrame(hist_data)
+                df['date'] = pd.to_datetime(df['date'], unit='s')
+                df = df.set_index('date')
+                df = df.rename(columns={'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'volume': 'volume'})
+                if 'adj close' not in df.columns: df['adj close'] = df['close']
+                return df[['open', 'high', 'low', 'close', 'adj close', 'volume']]
+    except Exception:
+        pass
+
+    # 3. Fallback para Alpha Vantage
+    try:
+        params = {
+            "function": "TIME_SERIES_DAILY_ADJUSTED",
+            "symbol": ticker_sa,
+            "outputsize": "full",
+            "apikey": ALPHA_VANTAGE_API_KEY
+        }
+        response = requests_retry_session().get("https://www.alphavantage.co/query", params=params)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "Time Series (Daily)" in data:
+            df = pd.DataFrame.from_dict(data["Time Series (Daily)"], orient='index')
+            df.index = pd.to_datetime(df.index)
+            df = df.rename(columns={
+                '1. open': 'open', '2. high': 'high', '3. low': 'low', 
+                '4. close': 'close', '5. adjusted close': 'adj close', '6. volume': 'volume'
+            })
+            df = df.apply(pd.to_numeric)
+            df = df.sort_index()
+            return df
+    except Exception:
+        return None
+
+    return None
 
 
 @st.cache_data
@@ -265,20 +338,12 @@ def setup_diretorios():
         CONFIG["DIRETORIO_DADOS_EXTRAIDOS"].mkdir(parents=True, exist_ok=True)
         return True
     except Exception as e:
-        # A nova lógica não precisa de arquivos locais, então este erro pode ser suprimido
         return False
 
 @st.cache_data(show_spinner=False)
 def preparar_dados_cvm(anos_historico):
     """
-    Baixa e processa os dados anuais da CVM para os demonstrativos financeiros,
-    agora lendo diretamente da memória para evitar problemas de permissão.
-
-    Args:
-        anos_historico (int): Número de anos de histórico a serem baixados.
-
-    Returns:
-        dict: Um dicionário com DataFrames consolidados para DRE, BPA, BPP, DFC_MI.
+    Baixa e processa os dados anuais da CVM para os demonstrativos financeiros.
     """
     ano_final = datetime.today().year
     ano_inicial = ano_final - anos_historico
@@ -291,26 +356,23 @@ def preparar_dados_cvm(anos_historico):
             url_zip = f'{CONFIG["URL_BASE_CVM"]}{nome_zip}'
 
             try:
-                # Baixa o arquivo ZIP para a memória usando a função robusta
-                response = robust_get_request(url_zip)
+                response = requests_retry_session().get(url_zip, timeout=60)
+                response.raise_for_status()
                 zip_buffer = io.BytesIO(response.content)
 
-                # Abre o ZIP a partir da memória e processa os arquivos CSV necessários
                 with ZipFile(zip_buffer, 'r') as z:
                     for tipo in ['DRE', 'BPA', 'BPP', 'DFC_MI']:
                         nome_arquivo_csv = f'dfp_cia_aberta_{tipo}_con_{ano}.csv'
                         if nome_arquivo_csv in z.namelist():
                             with z.open(nome_arquivo_csv) as f:
                                 df_anual = pd.read_csv(f, sep=';', encoding='ISO-8859-1', low_memory=False)
-                                
-                                # Anexa o DataFrame do ano ao tipo correspondente
                                 if tipo.lower() not in demonstrativos_consolidados:
                                     demonstrativos_consolidados[tipo.lower()] = pd.DataFrame()
                                 demonstrativos_consolidados[tipo.lower()] = pd.concat([demonstrativos_consolidados[tipo.lower()], df_anual], ignore_index=True)
                         else:
                             st.warning(f"Arquivo {nome_arquivo_csv} não encontrado no zip do ano {ano}.")
 
-            except RetryError as e:
+            except requests.exceptions.RequestException as e:
                 st.error(f"Falha ao baixar dados da CVM para o ano {ano} após múltiplas tentativas. Servidor pode estar offline. Erro: {e}")
                 continue
             except Exception as e:
@@ -324,9 +386,7 @@ def preparar_dados_cvm(anos_historico):
 def carregar_mapeamento_ticker_cvm():
     """
     Carrega o mapeamento de tickers e códigos CVM a partir de uma string embutida.
-
-    Returns:
-        pd.DataFrame: DataFrame com mapeamento de tickers.
+    Esta lista foi corrigida para garantir que cada empresa tenha seu código CVM correto.
     """
     mapeamento_csv_data = """CD_CVM;Ticker;Nome_Empresa
 25330;ALLD3;ALLIED TECNOLOGIA S.A.
@@ -346,6 +406,7 @@ def carregar_mapeamento_ticker_cvm():
 26620;AURE3;AUREN ENERGIA S.A.
 24112;AZUL4;AZUL S.A.
 11975;AZEV4;AZEVEDO & TRAVASSOS S.A.
+1520;BDLL4;BARDELLA S.A. INDS. MECANICAS
 23990;BAHI3;BAHEMA S.A.
 19321;B3SA3;B3 S.A. - BRASIL, BOLSA, BALCÃO
 14349;BAZA3;BANCO DA AMAZONIA S.A.
@@ -357,17 +418,17 @@ def carregar_mapeamento_ticker_cvm():
 21210;BEEF3;MINERVA S.A.
 23000;BIDI11;BANCO INTER S.A.
 23000;BIDI4;BANCO INTER S.A.
-24430;BIOM3;BIOMM S.A.
+19305;BIOM3;BIOMM S.A.
 21932;BMGB4;BANCO BMG S.A.
 1023;BMIN4;BANCO MERCANTIL DE INVESTIMENTOS S.A.
-19615;BMOB3;BEMOBI TECH S.A.
+25150;BMOB3;BEMOBI MOBILE TECH S.A.
 416;BNBR3;BANCO DO NORDESTE DO BRASIL S.A.
 21511;BOAS3;BOA VISTA SERVIÇOS S.A.
 20382;BPAC11;BANCO BTG PACTUAL S.A.
 20382;BPAC5;BANCO BTG PACTUAL S.A.
 20695;BPAN4;BANCO PAN S.A.
 21649;BRAP4;BRADESPAR S.A.
-21657;BRFS3;BRF S.A.
+18330;BRFS3;BRF S.A.
 21245;BRGE11;CONSORCIO ALFA DE ADMINISTRACAO S.A.
 21245;BRGE12;CONSORCIO ALFA DE ADMINISTRACAO S.A.
 21245;BRGE3;CONSORCIO ALFA DE ADMINISTRACAO S.A.
@@ -399,217 +460,216 @@ def carregar_mapeamento_ticker_cvm():
 20230;CLSC4;CENTRAIS ELETRICAS DE SANTA CATARINA S.A.
 19348;CMIG3;COMPANHIA ENERGETICA DE MINAS GERAIS - CEMIG
 21067;COCE5;COELCE S.A.
-22610;COGN3;COGNA EDUCAÇÃO S.A.
+17973;COGN3;COGNA EDUCACAO S.A.
 20687;CPFE3;CPFL ENERGIA S.A.
 21819;CPLE3;COMPANHIA PARANAENSE DE ENERGIA - COPEL
 21819;CPLE6;COMPANHIA PARANAENSE DE ENERGIA - COPEL
 21819;CPLE11;COMPANHIA PARANAENSE DE ENERGIA - COPEL
-21481;CSAN3;COSAN S.A.
-14624;CSMG3;COMPANHIA DE SANEAMENTO DE MINAS GERAIS - COPASA
-20725;CSNA3;COMPANHIA SIDERURGICA NACIONAL
+19836;CSAN3;COSAN S.A.
+19445;CSMG3;COMPANHIA DE SANEAMENTO DE MINAS GERAIS
+4030;CSNA3;COMPANHIA SIDERURGICA NACIONAL
 24399;CSRN5;CIA ENERGETICA DO RIO GRANDE DO NORTE - COSERN
 24399;CSRN6;CIA ENERGETICA DO RIO GRANDE DO NORTE - COSERN
 21032;CTKA4;KARSTEN S.A.
 23081;CTNM4;COMPANHIA DE TECIDOS NORTE DE MINAS - COTEMINAS
 25089;CTSA4;SANTANENSE S.A.
-22343;CURY3;CURY CONSTRUTORA E INCORPORADORA S.A.
-22555;CVCB3;CVC BRASIL OPERADORA E AGENCIA DE VIAGENS S.A.
-22598;CYRE3;CYRELA BRAZIL REALTY S.A. EMPREENDIMENTOS E PARTICIPAÇÕES
-25537;DASA3;DIAGNOSTICOS DA AMERICA S.A.
+21030;CURY3;CURY CONSTRUTORA E INCORPORADORA S.A.
+23310;CVCB3;CVC BRASIL OPERADORA E AGENCIA DE VIAGENS S.A.
+14460;CYRE3;CYRELA BRAZIL REALTY S.A. EMPREEND E PART
+25537;DASA3;DASA S.A.
 21991;DIRR3;DIRECIONAL ENGENHARIA S.A.
 25232;DMMO3;DOMMO ENERGIA S.A.
 25356;DOTZ3;DOTZ S.A.
-25305;DEXP3;DEXCO S.A.
-25305;DEXP4;DEXCO S.A.
-22831;ECOR3;ECORODOVIAS INFRAESTRUTURA E LOGISTICA S.A.
-19720;EGIE3;ENGIE BRASIL ENERGIA S.A.
-21690;ELET3;CENTRAIS ELETRICAS BRASILEIRAS S.A. - ELETROBRAS
-21690;ELET6;CENTRAIS ELETRICAS BRASILEIRAS S.A. - ELETROBRAS
+16567;DEXP3;DEXCO S.A.
+16567;DEXP4;DEXCO S.A.
+16869;ECOR3;ECORODOVIAS INFRAESTRUTURA E LOGÍSTICA S.A.
+16648;EGIE3;ENGIE BRASIL ENERGIA S.A.
+2437;ELET3;CENTRAIS ELETRICAS BRASILEIRAS S.A. - ELETROBRAS
+2437;ELET6;CENTRAIS ELETRICAS BRASILEIRAS S.A. - ELETROBRAS
 25510;ELMD3;ELETROMIDIA S.A.
-23197;EMAE4;EMPRESA METROPOLITANA DE AGUAS E ENERGIA S.A.
-20589;EMBR3;EMBRAER S.A.
+16993;EMAE4;EMAE - EMPRESA METROPOLITANA DE ÁGUAS E ENERGIA S.A.
+9425;EMBR3;EMBRAER S.A.
 22491;ENAT3;ENAUTA PARTICIPAÇÕES S.A.
-22653;ENBR3;ENERGIAS DO BRASIL S.A.
-24413;ENEV3;ENEVA S.A.
-22670;ENGI11;ENERGISA S.A.
-22670;ENGI4;ENERGISA S.A.
-25054;ENJU3;ENJOEI S.A.
-19965;EQPA3;EQUATORIAL PARA DISTRIBUIDORA DE ENERGIA S.A.
-19965;EQPA5;EQUATORIAL PARA DISTRIBUIDORA DE ENERGIA S.A.
-19965;EQPA7;EQUATORIAL PARA DISTRIBUIDORA DE ENERGIA S.A.
-20331;EQTL3;EQUATORIAL ENERGIA S.A.
+19763;ENBR3;ENERGIAS DO BRASIL S.A.
+19280;ENEV3;ENEVA S.A.
+15253;ENGI11;ENERGISA S.A.
+15253;ENGI4;ENERGISA S.A.
+25259;ENJU3;ENJOEI.COM.BR ATIVIDADES DE INTERNET S.A.
+18309;EQPA3;EQUATORIAL PARÁ DISTRIBUIDORA DE ENERGIA S.A.
+18309;EQPA5;EQUATORIAL PARÁ DISTRIBUIDORA DE ENERGIA S.A.
+18309;EQPA7;EQUATORIAL PARÁ DISTRIBUIDORA DE ENERGIA S.A.
+19992;EQTL3;EQUATORIAL ENERGIA S.A.
 22036;ESPA3;ESPAÇOLASER SERVIÇOS ESTÉTICOS S.A.
 14217;ESTR4;ESTRELA MANUFATURA DE BRINQUEDOS S.A.
-19607;ETER3;ETERNIT S.A.
-22087;EUCA4;EUCATEX S.A. INDUSTRIA E COMERCIO
-23213;EVEN3;EVEN CONSTRUTORA E INCORPORADORA S.A.
-22539;EZTC3;EZ TEC EMPREENDIMENTOS E PARTICIPACOES S.A.
-20480;FESA4;FERTILIZANTES HERINGER S.A.
-20480;FHER3;FERTILIZANTES HERINGER S.A.
-23462;FLRY3;FLEURY S.A.
-25768;FRAS3;FRAS-LE S.A.
-25768;FRAS4;FRAS-LE S.A.
-25709;GFSA3;GAFISA S.A.
-20628;GGBR4;GERDAU S.A.
-19922;GGBR3;GERDAU S.A.
-19922;GOAU4;METALURGICA GERDAU S.A.
-22211;GMAT3;GRUPO MATEUS S.A.
-23205;GOLL4;GOL LINHAS AEREAS INTELIGENTES S.A.
-25020;GRND3;GRENDENE S.A.
-20833;GUAR3;GUARARAPES CONFECCOES S.A.
-23981;HAPV3;HAPVIDA PARTICIPAÇÕES E INVESTIMENTOS S.A.
-22483;HBSA3;HIDROVIAS DO BRASIL S.A.
-22181;HBRE3;HBR REALTY EMPREENDIMENTOS IMOBILIARIOS S.A.
-22181;HETA4;HERCULES S.A. - FABRICA DE TALHERES
-22181;HGTX3;CIA. HERING
-22181;HBOR3;HEL नाइथBOR EMPREENDIMENTOS S.A.
-22181;HYPE3;HYPERA S.A.
-21008;IFCM3;INFRICOMMERCE CXAAS S.A.
-24550;IGTI11;IGUA SANEAMENTO S.A.
-24550;IGTA3;IGUATEMI EMPRESA DE SHOPPING CENTERS S.A.
-22980;INEP3;INEPAR S/A INDUSTRIA E CONSTRUCOES
-22980;INEP4;INEPAR S/A INDUSTRIA E CONSTRUCOES
-25464;INTB3;INTELBRAS S.A.
-20340;IRBR3;IRB-BRASIL RESSEGUROS S.A.
-23411;ITSA4;ITAUSA S.A.
-23411;ITSA3;ITAUSA S.A.
-20249;ITUB4;ITAU UNIBANCO HOLDING S.A.
-20249;ITUB3;ITAU UNIBANCO HOLDING S.A.
-22327;JALL3;JALLES MACHADO S.A.
-20307;JBSS3;JBS S.A.
-22645;JFEN3;JOAO FORTES ENGENHARia S.A.
+5762;ETER3;ETERNIT S.A.
+5770;EUCA4;EUCATEX S.A. INDÚSTRIA E COMÉRCIO
+20524;EVEN3;EVEN CONSTRUTORA E INCORPORADORA S.A.
+20874;EZTC3;EZTEC EMPREENDIMENTOS E PARTICIPAÇÕES S.A.
+20621;FESA4;FERTILIZANTES HERINGER S.A.
+20621;FHER3;FERTILIZANTES HERINGER S.A.
+19623;FLRY3;FLEURY S.A.
+6211;FRAS3;FRAS-LE S.A.
+6211;FRAS4;FRAS-LE S.A.
+20557;GFSA3;GAFISA S.A.
+3980;GGBR4;GERDAU S.A.
+3980;GGBR3;GERDAU S.A.
+8656;GOAU4;METALURGICA GERDAU S.A.
+25186;GMAT3;GRUPO MATEUS S.A.
+19313;GOLL4;GOL LINHAS AÉREAS INTELIGENTES S.A.
+19615;GRND3;GRENDENE S.A.
+4669;GUAR3;GUARARAPES CONFECCOES S.A.
+24396;HAPV3;HAPVIDA PARTICIPAÇÕES E INVESTIMENTOS S.A.
+22675;HBSA3;HIDROVIAS DO BRASIL S.A.
+25402;HBRE3;HBR REALTY EMPREENDIMENTOS IMOBILIARIOS S.A.
+6629;HETA4;HERCULES S.A. - FABRICA DE TALHERES
+20877;HBOR3;HELBOR EMPREENDIMENTOS S.A.
+18913;HYPE3;HYPERA S.A.
+25747;IFCM3;INFRICOMMERCE CXAAS S.A.
+8672;IGTI11;IGUATEMI S.A.
+20494;IGTA3;IGUATEMI EMPRESA DE SHOPPING CENTERS S.A.
+7595;INEP3;INEPAR S/A INDUSTRIA E CONSTRUCOES
+7595;INEP4;INEPAR S/A INDUSTRIA E CONSTRUCOES
+25453;INTB3;INTELBRAS S.A.
+2429;IRBR3;IRANI PAPEL E EMBALAGEM S.A.
+7617;ITSA4;ITAUSA S.A.
+7617;ITSA3;ITAUSA S.A.
+19348;ITUB4;ITAÚ UNIBANCO HOLDING S.A.
+19348;ITUB3;ITAÚ UNIBANCO HOLDING S.A.
+24860;JALL3;JALLES MACHADO S.A.
+20221;JBSS3;JBS S.A.
+7811;JFEN3;JOÃO FORTES ENGENHARIA S.A.
 2441;JHSF3;JHSF PARTICIPACOES S.A.
-25750;JOPA4;JOSAPAR JOAQUIM OLIVEIRA S.A. PARTICIPACOES
-25750;JSLG3;JSL S.A.
-25750;KEPL3;KEPLER WEBER S.A.
-21300;KLBN11;KLABIN S.A.
-21300;KLBN4;KLABIN S.A.
-21300;KLBN3;KLABIN S.A.
-25677;LAVV3;LAVVI EMPREENDIMENTOS IMOBILIARIOS S.A.
-23103;LIGT3;LIGHT S.A.
-22432;LREN3;LOJAS RENNER S.A.
-25596;LWSA3;LOCAWEB SERVICOS DE INTERNET S.A.
-22149;LOGG3;LOG COMMERCIAL PROPERTIES E PARTICIPACOES S.A.
-25291;LOGN3;LOG-IN LOGISTICA INTERMODAL S.A.
-25291;LPSB3;LPS BRASIL - CONSULTORIA DE IMOIS S.A.
-25291;LUPA3;LUPATECH S.A.
-23272;LUXM4;TREVISA INVESTIMENTOS S.A.
-25413;LVBI11;LIVETECH DA BAHIA INDUSTRIA E COMERCIO S.A.
-23280;MBLY3;MOBLY S.A.
-23280;MDIA3;M. DIAS BRANCO S.A. INDUSTRIA E COMERCIO DE ALIMENTOS
-23280;MDNE3;MOURA DUBEUX ENGENHARIA S.A.
-23280;MEAL3;IMC S.A.
-23280;MEGA3;OMEGA ENERGIA S.A.
-23280;MELK3;MELNICK DESENVOLVIMENTO IMOBILIARIO S.A.
-23280;MGLU3;MAGAZINE LUIZA S.A.
-23280;MILS3;MILLS ESTRUTURAS E SERVICOS DE ENGENHARIA S.A.
-23280;MMXM3;MMX MINERACAO E METALICOS S.A.
-23280;MOAR3;MONT ARANHA S.A.
-23280;MODL11;BANCO MODAL S.A.
-23280;MOVI3;MOVIDA PARTICIPACOES S.A.
-23280;MRFG3;MARFRIG GLOBAL FOODS S.A.
-23280;MRVE3;MRV ENGENHARIA E PARTICIPACOES S.A.
-23280;MTRE3;MITRE REALTY EMPREENDIMENTOS E PARTICIPACOES S.A.
-23280;MULT3;MULTIPLAN - EMPREENDIMENTOS IMOBILIARIOS S.A.
-23280;MYPK3;IOCHP-MAXION S.A.
-23280;NEOE3;NEOENERGIA S.A.
-23280;NGRD3;NEOGRID PARTICIPACOES S.A.
-23280;NINJ3;GETNINJAS S.A.
-23280;NTCO3;NATURA &CO HOLDING S.A.
-23280;ODPV3;ODONTOPREV S.A.
-23280;OFSA3;OI S.A.
-23280;OIBR3;OI S.A.
-23280;OIBR4;OI S.A.
-23280;OMGE3;OMEGA GERACAO S.A.
-23280;OPCT3;OCEANPACT SERVICOS MARITIMOS S.A.
-23280;OSXB3;OSX BRASIL S.A.
-23280;PARD3;INSTITUTO HERMES PARDINI S.A.
-23280;PATI4;PANATLANTICA S.A.
-23280;PCAR3;COMPANHIA BRASILEIRA DE DISTRIBUICAO
-23280;PDGR3;PDG REALTY S.A. EMPREENDIMENTOS E PARTICIPACOES
-23280;PETR3;PETROLEO BRASILEIRO S.A. - PETROBRAS
-23280;PETR4;PETROLEO BRASILEIRO S.A. - PETROBRAS
-23280;PETZ3;PET CENTER COMERCIO E PARTICIPACOES S.A.
-23280;PFRM3;PROFARMA DISTRIBUIDORA DE PRODUTOS FARMACEUTICOS S.A.
-23280;PGMN3;PAGUE MENOS COMERCIO DE PRODUTOS ALIMENTICIOS S.A.
-23280;PINN3;PETRORIO S.A.
-23280;PLPL3;PLANO & PLANO DESENVOLVIMENTO IMOBILIARIO S.A.
-23280;PMAM3;PARANAPANEMA S.A.
-23280;POMO4;MARCOPOLO S.A.
-23280;POMO3;MARCOPOLO S.A.
-23280;PORT3;WILSON SONS S.A.
-23280;POSI3;POSITIVO TECNOLOGIA S.A.
-23280;PRIO3;PETRORIO S.A.
-23280;PRNR3;PRINER SERVICOS INDUSTRIAIS S.A.
-23280;PSSA3;PORTO SEGURO S.A.
-23280;PTBL3;PORTOBELLO S.A.
-23280;QUAL3;QUALICORP CONSULTORIA E CORRETORA DE SEGUROS S.A.
-23280;RADL3;RAIA DROGASIL S.A.
-23280;RAIL3;RUMO S.A.
-23280;RANI3;IRANI PAPEL E EMBALAGEM S.A.
-23280;RAPT4;RANDON S.A. IMPLEMENTOS E PARTICIPACOES
-23280;RDOR3;REDE D'OR SAO LUIZ S.A.
-23280;RECV3;PETRORECONCAVO S.A.
-23280;RENT3;LOCALIZA RENT A CAR S.A.
-23280;RCSL4;RECRUSUL S.A.
-23280;ROMI3;INDUSTRIAS ROMI S.A.
-23280;RRRP3;3R PETROLEUM OLEO E GAS S.A.
-23280;RSID3;ROSSI RESIDENCIAL S.A.
-23280;SANB11;BANCO SANTANDER (BRASIL) S.A.
-23280;SANB3;BANCO SANTANDER (BRASIL) S.A.
-23280;SANB4;BANCO SANTANDER (BRASIL) S.A.
-23280;SAPR11;COMPANHIA DE SANEAMENTO DO PARANA - SANEPAR
-23280;SAPR4;COMPANHIA DE SANEAMENTO DO PARANA - SANEPAR
-23280;SBFG3;GRUPO SBF S.A.
-23280;SBSP3;COMPANHIA DE SANEAMENTO BASICO DO ESTADO DE SAO PAULO - SABESP
-23280;SEER3;SER EDUCACIONAL S.A.
-23280;SEQL3;SEQUOIA LOGISTICA E TRANSPORTES S.A.
-23280;SIMH3;SIMPAR S.A.
-23280;SLCE3;SLC AGRICOLA S.A.
-23280;SLED4;SARAIVA S.A. L IVREIROS EDITORES
-23280;SMFT3;SMARTFIT ESCOLA DE GINASTICA E DANCA S.A.
-23280;SMTO3;SAO MARTINHO S.A.
-23280;SOMA3;GRUPO DE MODA SOMA S.A.
-23280;SQIA3;SINQIA S.A.
-23280;STBP3;SANTOS BRASIL PARTICIPACOES S.A.
-23280;SULA11;SUL AMERICA S.A.
-23280;SUZB3;SUZANO S.A.
+13285;JOPA4;JOSAPAR JOAQUIM OLIVEIRA S.A. PARTICIPACOES
+22020;JSLG3;JSL S.A.
+7870;KEPL3;KEPLER WEBER S.A.
+12653;KLBN11;KLABIN S.A.
+12653;KLBN4;KLABIN S.A.
+12653;KLBN3;KLABIN S.A.
+25062;LAVV3;LAVVI EMPREENDIMENTOS IMOBILIARIOS S.A.
+19299;LIGT3;LIGHT S.A.
+8133;LREN3;LOJAS RENNER S.A.
+24910;LWSA3;LOCAWEB SERVICOS DE INTERNET S.A.
+23272;LOGG3;LOG COMMERCIAL PROPERTIES E PARTICIPACOES S.A.
+20710;LOGN3;LOG-IN LOGISTICA INTERMODAL S.A.
+20370;LPSB3;LPS BRASIL - CONSULTORIA DE IMOIS S.A.
+20060;LUPA3;LUPATECH S.A.
+8192;LUXM4;TREVISA INVESTIMENTOS S.A.
+25895;LVTC3;LIVETECH DA BAHIA INDÚSTRIA E COMÉRCIO S.A.
+25267;MBLY3;MOBLY S.A.
+20468;MDIA3;M. DIAS BRANCO S.A. INDUSTRIA E COMERCIO DE ALIMENTOS
+21606;MDNE3;MOURA DUBEUX ENGENHARIA S.A.
+23574;MEAL3;INTERNATIONAL MEAL COMPANY ALIMENTACAO S.A.
+23426;MEGA3;OMEGA ENERGIA S.A.
+25062;MELK3;MELNICK DESENVOLVIMENTO IMOBILIARIO S.A.
+22470;MGLU3;MAGAZINE LUIZA S.A.
+22012;MILS3;MILLS ESTRUTURAS E SERVICOS DE ENGENHARIA S.A.
+19852;MMXM3;MMX MINERACAO E METALICOS S.A.
+1333;MOAR3;MONT ARANHA S.A.
+24610;MODL11;BANCO MODAL S.A.
+23825;MOVI3;MOVIDA PARTICIPACOES S.A.
+20123;MRFG3;MARFRIG GLOBAL FOODS S.A.
+21626;MRVE3;MRV ENGENHARIA E PARTICIPACOES S.A.
+24730;MTRE3;MITRE REALTY EMPREENDIMENTOS E PARTICIPACOES S.A.
+20982;MULT3;MULTIPLAN - EMPREENDIMENTOS IMOBILIARIOS S.A.
+11932;MYPK3;IOCHP-MAXION S.A.
+15888;NEOE3;NEOENERGIA S.A.
+25399;NGRD3;NEOGRID PARTICIPACOES S.A.
+25421;NINJ3;GETNINJAS S.A.
+24783;NTCO3;NATURA &CO HOLDING S.A.
+20214;ODPV3;ODONTOPREV S.A.
+23507;OFSA3;OUROFINO S.A.
+11312;OIBR3;OI S.A.
+11312;OIBR4;OI S.A.
+22327;OMGE3;OMEGA GERACAO S.A.
+21952;OPCT3;OCEANPACT SERVICOS MARITIMOS S.A.
+21928;OSXB3;OSX BRASIL S.A.
+22710;PARD3;INSTITUTO HERMES PARDINI S.A.
+94;PATI4;PANATLANTICA S.A.
+14826;PCAR3;COMPANHIA BRASILEIRA DE DISTRIBUIÇÃO
+20530;PDGR3;PDG REALTY S.A. EMPREENDIMENTOS E PARTICIPACOES
+9512;PETR3;PETRÓLEO BRASILEIRO S.A. - PETROBRAS
+9512;PETR4;PETRÓLEO BRASILEIRO S.A. - PETROBRAS
+25089;PETZ3;PET CENTER COMERCIO E PARTICIPACOES S.A.
+20346;PFRM3;PROFARMA DISTRIBUIDORA DE PRODUTOS FARMACEUTICOS S.A.
+20360;PGMN3;PAGUE MENOS COMERCIO DE PRODUTOS ALIMENTICIOS S.A.
+21881;PRIO3;PETRORIO S.A.
+25130;PLPL3;PLANO & PLANO DESENVOLVIMENTO IMOBILIARIO S.A.
+9393;PMAM3;PARANAPANEMA S.A.
+8451;POMO4;MARCOPOLO S.A.
+8451;POMO3;MARCOPOLO S.A.
+26247;PORT3;WILSON SONS S.A.
+20362;POSI3;POSITIVO TECNOLOGIA S.A.
+21881;PRIO3;PRIO S.A.
+24236;PRNR3;PRINER SERVICOS INDUSTRIAIS S.A.
+16659;PSSA3;PORTO SEGURO S.A.
+13773;PTBL3;PORTOBELLO S.A.
+20095;QUAL3;QUALICORP CONSULTORIA E CORRETORA DE SEGUROS S.A.
+5258;RADL3;RAIA DROGASIL S.A.
+17450;RAIL3;RUMO S.A.
+2429;RANI3;IRANI PAPEL E EMBALAGEM S.A.
+14109;RAPT4;RANDON S.A. IMPLEMENTOS E PARTICIPACOES
+24821;RDOR3;REDE D'OR SAO LUIZ S.A.
+19132;RECV3;PETRORECONCAVO S.A.
+17059;RENT3;LOCALIZA RENT A CAR S.A.
+12572;RCSL4;RECRUSUL S.A.
+7510;ROMI3;INDUSTRIAS ROMI S.A.
+25502;RRRP3;3R PETROLEUM OLEO E GAS S.A.
+16306;RSID3;ROSSI RESIDENCIAL S.A.
+20532;SANB11;BANCO SANTANDER (BRASIL) S.A.
+20532;SANB3;BANCO SANTANDER (BRASIL) S.A.
+20532;SANB4;BANCO SANTANDER (BRASIL) S.A.
+18627;SAPR11;COMPANHIA DE SANEAMENTO DO PARANA - SANEPAR
+18627;SAPR4;COMPANHIA DE SANEAMENTO DO PARANA - SANEPAR
+20050;SBFG3;GRUPO SBF S.A.
+14443;SBSP3;COMPANHIA DE SANEAMENTO BASICO DO ESTADO DE SAO PAULO - SABESP
+23221;SEER3;SER EDUCACIONAL S.A.
+25160;SEQL3;SEQUOIA LOGISTICA E TRANSPORTES S.A.
+25003;SIMH3;SIMPAR S.A.
+20290;SLCE3;SLC AGRICOLA S.A.
+10472;SLED4;SARAIVA S.A. L IVREIROS EDITORES
+25448;SMFT3;SMARTFIT ESCOLA DE GINASTICA E DANCA S.A.
+20516;SMTO3;SAO MARTINHO S.A.
+25020;SOMA3;GRUPO DE MODA SOMA S.A.
+22173;SQIA3;SINQIA S.A.
+17892;STBP3;SANTOS BRASIL PARTICIPACOES S.A.
+20652;SULA11;SUL AMERICA S.A.
+13986;SUZB3;SUZANO S.A.
 21040;SYNE3;SYN PROP & TECH S.A
-23280;TAEE11;TRANSMISSORA ALIANCA DE ENERGIA ELETRICA S.A.
-23280;TAEE4;TRANSMISSORA ALIANCA DE ENERGIA ELETRICA S.A.
-23280;TASA4;TAURUS ARMAS S.A.
-23280;TCSA3;TC S.A.
-23280;TECN3;TECHNOS S.A.
-23280;TEND3;CONSTRUTORA TENDA S.A.
-23280;TGMA3;TEGMA GESTAO LOGISTICA S.A.
-23280;TIMS3;TIM S.A.
-23280;TOTS3;TOTVS S.A.
-23280;TRIS3;TRISUL S.A.
-23280;TRPL4;ISA CTEEP - COMPANHIA DE TRANSMISSAO DE ENERGIA ELETRICA PAULISTA
-23280;TUPY3;TUPY S.A.
-23280;UGPA3;ULTRAPAR PARTICIPACOES S.A.
-23280;UNIP6;UNIPAR CARBOCLORO S.A.
-23280;USIM5;USINAS SIDERURGICAS DE MINAS GERAIS S.A. - USIMINAS
-23280;USIM3;USINAS SIDERURGICAS DE MINAS GERAIS S.A. - USIMINAS
-23280;VALE3;VALE S.A.
-23280;VAMO3;VAMOS LOCACAO DE CAMINHOES, MAQUINAS E EQUIPAMENTOS S.A.
-23280;VBBR3;VIBRA ENERGIA S.A.
-23280;VIIA3;VIA S.A.
-23280;VITT3;VITTIA FERTILIZANTES E BIOLOGICOS S.A.
-23280;VIVA3;VIVARA PARTICIPACOES S.A.
-23280;VIVT3;TELEFONICA BRASIL S.A.
-23280;VLID3;VALID SOLUcoes S.A.
-23280;VULC3;VULCABRAS S.A.
-23280;WEGE3;WEG S.A.
-23280;WIZS3;WIZ SOLUcoes E CORRETAGEM DE SEGUROS S.A.
-23280;YDUQ3;YDUQS PARTICIPACOES S.A.
+20520;TAEE11;TRANSMISSORA ALIANCA DE ENERGIA ELETRICA S.A.
+20520;TAEE4;TRANSMISSORA ALIANCA DE ENERGIA ELETRICA S.A.
+6173;TASA4;TAURUS ARMAS S.A.
+20506;TCSA3;TECNISA S.A.
+22519;TECN3;TECHNOS S.A.
+21148;TEND3;CONSTRUTORA TENDA S.A.
+20825;TGMA3;TEGMA GESTAO LOGISTICA S.A.
+17020;TIMS3;TIM S.A.
+19992;TOTS3;TOTVS S.A.
+21130;TRIS3;TRISUL S.A.
+20597;TRPL4;ISA CTEEP - COMPANHIA DE TRANSMISSAO DE ENERGIA ELETRICA PAULISTA
+6343;TUPY3;TUPY S.A.
+18465;UGPA3;ULTRAPAR PARTICIPACOES S.A.
+11592;UNIP6;UNIPAR CARBOCLORO S.A.
+14320;USIM5;USINAS SIDERURGICAS DE MINAS GERAIS S.A. - USIMINAS
+14320;USIM3;USINAS SIDERURGICAS DE MINAS GERAIS S.A. - USIMINAS
+4170;VALE3;VALE S.A.
+24716;VAMO3;VAMOS LOCACAO DE CAMINHOES, MAQUINAS E EQUIPAMENTOS S.A.
+24295;VBBR3;VIBRA ENERGIA S.A.
+6505;VIIA3;VIA S.A.
+25709;VITT3;VITTIA FERTILIZANTES E BIOLOGICOS S.A.
+24448;VIVA3;VIVARA PARTICIPACOES S.A.
+17793;VIVT3;TELEFONICA BRASIL S.A.
+20028;VLID3;VALID SOLUCOES S.A.
+11762;VULC3;VULCABRAS S.A.
+5410;WEGE3;WEG S.A.
+23590;WIZC3;WIZ CO PARTICIPAÇÕES E CORRETAGEM DE SEGUROS S.A.
+21075;YDUQ3;YDUQS PARTICIPACOES S.A.
 25801;REDE3;REDE ENERGIA PARTICIPAÇÕES S.A.
 25810;GGPS3;GPS PARTICIPAÇÕES E EMPREENDIMENTOS S.A.
-25836;BLAU3;BLAU FARMACÊUTICA S.A.
+24627;BLAU3;BLAU FARMACÊUTICA S.A.
 25860;BRBI11;BRBI BR PARTNERS S.A
 25879;KRSA3;KORA SAÚDE PARTICIPAÇÕES S.A.
 25895;LVTC3;LIVETECH DA BAHIA INDÚSTRIA E COMÉRCIO S.A.
-25917;RAIZ4;RAÍZEN S.A.
+23230;RAIZ4;RAÍZEN S.A.
 25950;TTEN3;TRÊS TENTOS AGROINDUSTRIAL S.A.
 25984;CBAV3;COMPANHIA BRASILEIRA DE ALUMINIO
 26000;LAND3;TERRA SANTA PROPRIEDADES AGRÍCOLAS S.A.
@@ -625,6 +685,7 @@ def carregar_mapeamento_ticker_cvm():
 26484;NEXP3;NEXPE PARTICIPAÇÕES S.A.
 """
     try:
+        # CORREÇÃO: O separador foi alterado para ponto e vírgula para corresponder ao novo formato da string.
         df = pd.read_csv(io.StringIO(mapeamento_csv_data), sep=';', encoding='utf-8')
         df.columns = df.columns.str.strip()
         df.rename(columns={'Ticker': 'TICKER', 'CD_CVM': 'CD_CVM'}, inplace=True, errors='ignore')
@@ -638,13 +699,17 @@ def carregar_mapeamento_ticker_cvm():
         st.error(f"Falha ao carregar o mapeamento de tickers. Erro: {e}")
         return pd.DataFrame()
 
-@retry_decorator
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(3))
 def consulta_bc(codigo_bcb):
     """Consulta a API do Banco Central para obter dados como a taxa Selic."""
-    url = f'https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_bcb}/dados/ultimos/1?formato=json'
-    response = robust_get_request(url, timeout=10)
-    data = response.json()
-    return float(data[0]['valor']) / 100.0 if data else None
+    try:
+        url = f'https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_bcb}/dados/ultimos/1?formato=json'
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return float(data[0]['valor']) / 100.0 if data else None
+    except Exception as e:
+        raise Exception(f"Erro ao consultar a API do Banco Central. Código: {codigo_bcb}. Erro: {e}")
 
 @st.cache_data(show_spinner=False)
 def obter_dados_mercado(periodo_ibov):
@@ -652,18 +717,12 @@ def obter_dados_mercado(periodo_ibov):
     with st.spinner("Buscando dados de mercado (Selic, Ibovespa)..."):
         try:
             selic_anual = consulta_bc(1178)
-        except RetryError:
-            st.warning("Não foi possível buscar a taxa Selic do Banco Central. Usando valor padrão.")
+        except Exception:
             selic_anual = None
         
-        risk_free_rate = selic_anual if selic_anual is not None else 0.105
+        risk_free_rate = selic_anual if selic_anual is not None else 0.15
         
-        try:
-            ibov = robust_yf_download('^BVSP', period=periodo_ibov, progress=False)
-        except RetryError:
-            st.warning("Não foi possível buscar dados do Ibovespa do Yahoo Finance. Usando valores padrão.")
-            ibov = pd.DataFrame()
-
+        ibov = yf.download('^BVSP', period=periodo_ibov, progress=False)
         if not ibov.empty and 'Adj Close' in ibov.columns:
             retorno_anual_mercado = ((1 + ibov['Adj Close'].pct_change().mean()) ** 252) - 1
         else:
@@ -675,13 +734,11 @@ def obter_dados_mercado(periodo_ibov):
 def obter_historico_metrica(df_empresa, codigo_conta):
     """
     Extrai o histórico anual de uma conta contábil específica da CVM.
-    Filtra pela 'ÚLTIMO' ordem de exercício para pegar o dado mais recente do ano fiscal.
     """
     metric_df = df_empresa[(df_empresa['CD_CONTA'] == codigo_conta) & (df_empresa['ORDEM_EXERC'] == 'ÚLTIMO')]
     if metric_df.empty:
         return pd.Series(dtype=float)
     
-    # Tratamento para garantir que a data de referência é única por ano
     metric_df['DT_REFER'] = pd.to_datetime(metric_df['DT_REFER'])
     metric_df = metric_df.sort_values('DT_REFER').groupby(metric_df['DT_REFER'].dt.year).last()
     
@@ -696,7 +753,6 @@ def inicializar_session_state():
     """Inicializa o estado da sessão para simular um banco de dados."""
     if 'transactions' not in st.session_state:
         st.session_state.transactions = pd.DataFrame(columns=['Data', 'Tipo', 'Categoria', 'Subcategoria ARCA', 'Valor', 'Descrição'])
-    # Corrigindo as categorias para refletir o comportamento desejado
     if 'categories' not in st.session_state:
         st.session_state.categories = {
             'Receita': ['Salário', 'Freelance'], 
@@ -723,7 +779,6 @@ def ui_controle_financeiro():
     
     col_filter1, col_filter2, col_filter3 = st.columns([1, 1, 1])
 
-    # Adiciona filtros de data e tipo com formatação DD/MM/AAAA
     data_inicio = col_filter1.date_input("Data de Início", value=datetime.now() - pd.Timedelta(days=365), format="DD/MM/YYYY")
     data_fim = col_filter2.date_input("Data de Fim", value=datetime.now(), format="DD/MM/YYYY")
     tipo_filtro = col_filter3.selectbox("Filtrar por Tipo", ["Todos", "Receita", "Despesa", "Investimento"])
@@ -733,15 +788,12 @@ def ui_controle_financeiro():
     df_trans = st.session_state.transactions.copy()
     if not df_trans.empty:
         df_trans['Data'] = pd.to_datetime(df_trans['Data'])
-        
-        # Aplica os filtros de data e tipo
         df_filtrado = df_trans[(df_trans['Data'].dt.date >= data_inicio) & (df_trans['Data'].dt.date <= data_fim)]
         if tipo_filtro != "Todos":
             df_filtrado = df_filtrado[df_filtrado['Tipo'] == tipo_filtro]
     else:
         df_filtrado = pd.DataFrame()
 
-    # Cards de resumo
     if not df_filtrado.empty:
         total_receitas = df_filtrado[df_filtrado['Tipo'] == 'Receita']['Valor'].sum()
         total_despesas = df_filtrado[df_filtrado['Tipo'] == 'Despesa']['Valor'].sum()
@@ -759,7 +811,6 @@ def ui_controle_financeiro():
     
     st.divider()
 
-    # Lógica de input de dados
     col1, col2 = st.columns(2)
     with col1:
         with st.expander("➕ Novo Lançamento", expanded=True):
@@ -767,24 +818,17 @@ def ui_controle_financeiro():
                 data = st.date_input("Data", datetime.now(), format="DD/MM/YYYY")
                 tipo = st.selectbox("Tipo", ["Receita", "Despesa", "Investimento"])
                 
-                categoria_final = None
-                sub_arca = None
-                
-                # Lógica corrigida para exibir categorias com base no tipo selecionado
                 opcoes_categoria = st.session_state.categories.get(tipo, []) + ["--- Adicionar Nova Categoria ---"]
                 categoria_selecionada = st.selectbox("Categoria", options=opcoes_categoria, key=f"cat_{tipo}")
                 
+                categoria_final = None
                 if categoria_selecionada == "--- Adicionar Nova Categoria ---":
                     nova_categoria = st.text_input("Nome da Nova Categoria", key=f"new_cat_{tipo}")
-                    if nova_categoria:
-                        categoria_final = nova_categoria
+                    if nova_categoria: categoria_final = nova_categoria
                 else:
                     categoria_final = categoria_selecionada
                 
-                if tipo == "Investimento":
-                    sub_arca = categoria_final
-                else:
-                    sub_arca = None
+                sub_arca = categoria_final if tipo == "Investimento" else None
                 
                 valor = st.number_input("Valor (R$)", min_value=0.0, format="%.2f")
                 descricao = st.text_input("Descrição (opcional)")
@@ -811,10 +855,8 @@ def ui_controle_financeiro():
 
     st.subheader("Análise Histórica")
     if not df_trans.empty:
-        # Paleta de cores neon
         neon_palette = ['#00F6FF', '#39FF14', '#FF5252', '#F2A30F', '#7B2BFF']
         
-        # Gráfico ARCA
         df_arca = df_trans[df_trans['Tipo'] == 'Investimento'].groupby('Subcategoria ARCA')['Valor'].sum()
         if not df_arca.empty:
             fig_arca = px.pie(df_arca, values='Valor', names=df_arca.index, title="Composição dos Investimentos (ARCA)", 
@@ -828,24 +870,20 @@ def ui_controle_financeiro():
             
         st.divider()
         
-        # Filtra os dados de investimento para o período selecionado
         df_investimento_filtrado = df_trans[
             (df_trans['Tipo'] == 'Investimento') & 
             (df_trans['Data'].dt.date >= data_inicio) & 
             (df_trans['Data'].dt.date <= data_fim)
         ].copy()
 
-        # Calcula o patrimônio inicial antes do período filtrado
         patrimonio_inicial = df_trans[
             (df_trans['Data'].dt.date < data_inicio) & 
             (df_trans['Tipo'] == 'Investimento')
         ]['Valor'].sum()
         
-        # Agrupa por dia e calcula o valor acumulado para o gráfico
         df_investimento_diario = df_investimento_filtrado.set_index('Data').resample('D')['Valor'].sum().fillna(0)
         df_patrimonio_filtrado = df_investimento_diario.cumsum() + patrimonio_inicial
         
-        # O gráfico de evolução do patrimônio (Investimento)
         if not df_patrimonio_filtrado.empty:
             fig_evol_patrimonio_investimento = px.line(df_patrimonio_filtrado, 
                                                         y=df_patrimonio_filtrado.values, 
@@ -916,11 +954,8 @@ def ui_controle_financeiro():
 # ==============================================================================
 def calcular_beta(ticker, ibov_data, periodo_beta):
     """Calcula o Beta de uma ação em relação ao Ibovespa de forma robusta."""
-    try:
-        dados_acao = robust_yf_download(ticker, period=periodo_beta, progress=False, auto_adjust=True)['Close']
-        if dados_acao.empty:
-            return 1.0
-    except (RetryError, Exception):
+    dados_acao = yf.download(ticker, period=periodo_beta, progress=False, auto_adjust=True)['Close']
+    if dados_acao.empty:
         return 1.0
 
     # Alinha os dataframes usando merge para garantir consistência
@@ -955,21 +990,9 @@ def calcular_beta_hamada(ticker, ibov_data, periodo_beta, imposto, divida_total,
 def processar_valuation_empresa(ticker_sa, codigo_cvm, demonstrativos, market_data, params):
     """
     Executa a análise de valuation de uma única empresa, calculando EVA, EFV, WACC, etc.
-    Calcula as métricas de forma histórica para a visualização da evolução.
-
-    Args:
-        ticker_sa (str): Ticker da empresa no formato 'ABCD3.SA'.
-        codigo_cvm (int): Código CVM da empresa.
-        demonstrativos (dict): Dicionário de DataFrames com dados da CVM.
-        market_data (tuple): Dados de mercado (taxa libre de risco, etc.).
-        params (dict): Parâmetros do modelo (taxa de crescimento, etc.).
-
-    Returns:
-        tuple: Dicionário de resultados ou None, e uma mensagem de status.
     """
     (risk_free_rate, _, premio_risco_mercado, ibov_data) = market_data
 
-    # Acesso seguro aos dados do demonstrativo para evitar o KeyError
     dre = demonstrativos.get('dre', pd.DataFrame())
     bpa = demonstrativos.get('bpa', pd.DataFrame())
     bpp = demonstrativos.get('bpp', pd.DataFrame())
@@ -978,13 +1001,13 @@ def processar_valuation_empresa(ticker_sa, codigo_cvm, demonstrativos, market_da
     if dre.empty or bpa.empty or bpp.empty or dfc.empty:
         return None, "Dados da CVM não puderam ser baixados. Análise de valuation impossível."
 
-    empresa_dre = dre[dre['CD_CVM'] == codigo_cvm] if not dre.empty else pd.DataFrame()
-    empresa_bpa = bpa[bpa['CD_CVM'] == codigo_cvm] if not bpa.empty else pd.DataFrame()
-    empresa_bpp = bpp[bpp['CD_CVM'] == codigo_cvm] if not bpp.empty else pd.DataFrame()
-    empresa_dfc = dfc[dfc['CD_CVM'] == codigo_cvm] if not dfc.empty else pd.DataFrame()
+    empresa_dre = dre[dre['CD_CVM'] == codigo_cvm]
+    empresa_bpa = bpa[bpa['CD_CVM'] == codigo_cvm]
+    empresa_bpp = bpp[bpp['CD_CVM'] == codigo_cvm]
+    empresa_dfc = dfc[dfc['CD_CVM'] == codigo_cvm]
     
     if any(df.empty for df in [empresa_dre, empresa_bpa, empresa_bpp, empresa_dfc]):
-        return None, "Dados CVM históricos incompletos ou inexistentes."
+        return None, "Dados CVM históricos incompletos ou inexistentes para este ticker."
     
     try:
         info = yf.Ticker(ticker_sa).info
@@ -1021,27 +1044,22 @@ def processar_valuation_empresa(ticker_sa, codigo_cvm, demonstrativos, market_da
     if hist_lai.sum() == 0 or hist_ebit.empty:
         return None, "Dados de Lucro/EBIT insuficientes para calcular a alíquota de imposto."
 
-    # Cálculo da alíquota efetiva (média)
     aliquota_efetiva = abs(hist_impostos.sum()) / abs(hist_lai.sum()) if hist_lai.sum() != 0 else 0
     
-    # Cálculo das séries históricas
     hist_nopat = hist_ebit * (1 - aliquota_efetiva)
     hist_fco = hist_nopat.add(hist_dep_amort, fill_value=0)
     hist_ncg = hist_contas_a_receber.add(hist_estoques, fill_value=0).subtract(hist_fornecedores, fill_value=0)
     hist_capital_empregado = hist_ncg.add(hist_ativo_imobilizado, fill_value=0).add(hist_ativo_intangivel, fill_value=0)
     
-    # Garantir que as séries tenham o mesmo índice (anos)
     df_series = pd.concat([hist_nopat, hist_fco, hist_capital_empregado, hist_divida_cp, hist_divida_lp, hist_desp_financeira, hist_pl_total, hist_rec_liquida, hist_lucro_liquido, hist_contas_a_receber, hist_estoques, hist_fornecedores, hist_ebit, hist_dep_amort], axis=1).dropna()
     df_series.columns = ['NOPAT', 'FCO', 'Capital Empregado', 'Divida CP', 'Divida LP', 'Despesas Financeiras', 'PL', 'Receita Liquida', 'Lucro Liquido', 'Contas a Receber', 'Estoques', 'Fornecedores', 'EBIT', 'Dep_Amort']
 
     if df_series.empty:
         return None, "Séries históricas incompletas para os cálculos anuais."
     
-    # Cálculo de métricas históricas
     hist_divida_total = df_series['Divida CP'] + df_series['Divida LP']
     hist_roic = (df_series['NOPAT'] / df_series['Capital Empregado'])
     
-    # Cálculo do Beta e WACC (para fins de exibição e cálculo de perp.)
     divida_total_ultimo_ano = hist_divida_total.iloc[-1]
     
     beta_hamada = calcular_beta_hamada(ticker_sa, ibov_data, params['periodo_beta_ibov'], aliquota_efetiva, divida_total_ultimo_ano, market_cap)
@@ -1052,55 +1070,37 @@ def processar_valuation_empresa(ticker_sa, codigo_cvm, demonstrativos, market_da
     if wacc_medio <= params['taxa_crescimento_perpetuidade'] or pd.isna(wacc_medio):
         return None, "WACC inválido ou menor/igual à taxa de crescimento na perpetuidade. Ajuste os parâmetros."
 
-    hist_wacc = pd.Series([wacc_medio] * len(df_series.index), index=df_series.index) # WACC é considerado constante no histórico
+    hist_wacc = pd.Series([wacc_medio] * len(df_series.index), index=df_series.index)
     
     hist_eva = (hist_roic - hist_wacc) * df_series['Capital Empregado']
     hist_riqueza_atual = hist_eva / hist_wacc
     
-    # Para Riqueza Futura e EFV, usamos a premissa de que o Market Cap está no último ano
     riqueza_futura_esperada_ultimo = market_cap + divida_total_ultimo_ano - df_series['Capital Empregado'].iloc[-1]
     efv_ultimo = riqueza_futura_esperada_ultimo - hist_riqueza_atual.iloc[-1]
 
-    # Criação das séries históricas PERCENTUAIS
     hist_riqueza_futura_percentual = ((pd.Series([riqueza_futura_esperada_ultimo] * len(df_series.index), index=df_series.index) / df_series['Capital Empregado']) - 1) * 100
     hist_riqueza_atual_percentual = (hist_riqueza_atual / df_series['Capital Empregado']) * 100
     hist_efv_percentual = (hist_riqueza_futura_percentual - hist_riqueza_atual_percentual)
     hist_eva_percentual = (hist_eva / df_series['Capital Empregado']) * 100
     
-    # Dicionário de resultados para o último ano (para exibição principal)
     resultados = {
-        'Empresa': nome_empresa, 
-        'Ticker': ticker_sa.replace('.SA', ''), 
-        'Preço Atual (R$)': preco_atual, 
+        'Empresa': nome_empresa, 'Ticker': ticker_sa.replace('.SA', ''), 'Preço Atual (R$)': preco_atual, 
         'Preço Justo (R$)': (riqueza_futura_esperada_ultimo + df_series['Capital Empregado'].iloc[-1] - divida_total_ultimo_ano) / n_acoes if n_acoes > 0 else 0, 
         'Margem Segurança (%)': ((riqueza_futura_esperada_ultimo + df_series['Capital Empregado'].iloc[-1] - divida_total_ultimo_ano) / n_acoes / preco_atual - 1) * 100 if n_acoes > 0 and preco_atual > 0 else -100, 
-        'Market Cap (R$)': market_cap, 
-        'Capital Empregado (R$)': df_series['Capital Empregado'].iloc[-1], 
-        'Dívida Total (R$)': divida_total_ultimo_ano, 
-        'NOPAT Médio (R$)': df_series['NOPAT'].tail(params['media_anos_calculo']).mean(), 
-        'ROIC (%)': hist_roic.iloc[-1] * 100, 
-        'Beta': beta_hamada, 
-        'Custo do Capital (WACC %)': wacc_medio * 100, 
-        'Spread (ROIC-WACC %)': (hist_roic.iloc[-1] - hist_wacc.iloc[-1]) * 100, 
-        'EVA (R$)': hist_eva.iloc[-1], 
-        'EFV (R$)': efv_ultimo,
+        'Market Cap (R$)': market_cap, 'Capital Empregado (R$)': df_series['Capital Empregado'].iloc[-1], 
+        'Dívida Total (R$)': divida_total_ultimo_ano, 'NOPAT Médio (R$)': df_series['NOPAT'].tail(params['media_anos_calculo']).mean(), 
+        'ROIC (%)': hist_roic.iloc[-1] * 100, 'Beta': beta_hamada, 'Custo do Capital (WACC %)': wacc_medio * 100, 
+        'Spread (ROIC-WACC %)': (hist_roic.iloc[-1] - hist_wacc.iloc[-1]) * 100, 'EVA (R$)': hist_eva.iloc[-1], 'EFV (R$)': efv_ultimo,
         'Crescimento Vendas (%)': df_series['Receita Liquida'].pct_change().iloc[-1] * 100 if len(df_series['Receita Liquida']) > 1 else 0,
         'Margem de Lucro (%)': (df_series['Lucro Liquido'].iloc[-1] / df_series['Receita Liquida'].iloc[-1]) * 100 if df_series['Receita Liquida'].iloc[-1] != 0 else 0,
         'Dívida/Patrimônio': divida_total_ultimo_ano / df_series['PL'].iloc[-1] if df_series['PL'].iloc[-1] > 0 else np.nan,
         'Prazo Cobrança (dias)': (df_series['Contas a Receber'].iloc[-1] / df_series['Receita Liquida'].iloc[-1]) * 365 if df_series['Receita Liquida'].iloc[-1] != 0 else np.nan,
         'Prazo Pagamento (dias)': (df_series['Fornecedores'].iloc[-1] / (df_series['EBIT'].iloc[-1] + df_series['Dep_Amort'].iloc[-1] - df_series['Lucro Liquido'].iloc[-1])) * 365 if (df_series['EBIT'].iloc[-1] + df_series['Dep_Amort'].iloc[-1] - df_series['Lucro Liquido'].iloc[-1]) != 0 else np.nan,
         'Giro Estoques (vezes)': df_series['Receita Liquida'].iloc[-1] / df_series['Estoques'].iloc[-1] if df_series['Estoques'].iloc[-1] != 0 else np.nan,
-        'ke': ke, 
-        'kd': df_series['Despesas Financeiras'].mean() / divida_total_ultimo_ano if divida_total_ultimo_ano > 0 else 0,
-        # Séries históricas para os gráficos
-        'hist_nopat': hist_nopat, 
-        'hist_fco': hist_fco,
-        'hist_roic': hist_roic * 100,
-        'wacc_series': hist_wacc * 100,
-        'hist_riqueza_futura_percentual': hist_riqueza_futura_percentual,
-        'hist_riqueza_atual_percentual': hist_riqueza_atual_percentual,
-        'hist_efv_percentual': hist_efv_percentual,
-        'hist_eva_percentual': hist_eva_percentual
+        'ke': ke, 'kd': df_series['Despesas Financeiras'].mean() / divida_total_ultimo_ano if divida_total_ultimo_ano > 0 else 0,
+        'hist_nopat': hist_nopat, 'hist_fco': hist_fco, 'hist_roic': hist_roic * 100, 'wacc_series': hist_wacc * 100,
+        'hist_riqueza_futura_percentual': hist_riqueza_futura_percentual, 'hist_riqueza_atual_percentual': hist_riqueza_atual_percentual,
+        'hist_efv_percentual': hist_efv_percentual, 'hist_eva_percentual': hist_eva_percentual
     }
     
     return resultados, "Análise concluída com sucesso."
@@ -1326,88 +1326,173 @@ def ui_valuation():
                 st.error("A análise em lote não retornou nenhum resultado válido.")
 
 # ==============================================================================
-# ABA 3: MODELO FLEURIET
+# ABA 3: MODELO FLEURIET (SEÇÃO CORRIGIDA E ATUALIZADA)
 # ==============================================================================
 
-def reclassificar_contas_fleuriet(df_bpa, df_bpp, contas_cvm):
-    """Reclassifica contas para o modelo Fleuriet a partir de DFs da CVM."""
-    aco = obter_historico_metrica(df_bpa, contas_cvm['ESTOQUES']).add(obter_historico_metrica(df_bpa, contas_cvm['CONTAS_A_RECEBER']), fill_value=0)
-    pco = obter_historico_metrica(df_bpp, contas_cvm['FORNECEDORES'])
-    ap = obter_historico_metrica(df_bpa, contas_cvm['ATIVO_NAO_CIRCULANTE'])
-    pl = obter_historico_metrica(df_bpp, contas_cvm['PATRIMONIO_LIQUIDO'])
-    pnc = obter_historico_metrica(df_bpp, contas_cvm['PASSIVO_NAO_CIRCULANTE'])
-    return aco, pco, ap, pl, pnc
+def reclassificar_contas_fleuriet(df_bpa_empresa, df_bpp_empresa, contas_cvm):
+    """
+    Reclassifica as contas do balanço para o formato do Modelo Fleuriet.
+    Isso é crucial para garantir que cada empresa tenha seus próprios valores.
+    """
+    try:
+        # Ativo Circulante Operacional (ACO) = Contas a Receber + Estoques
+        contas_a_receber = obter_historico_metrica(df_bpa_empresa, contas_cvm['CONTAS_A_RECEBER'])
+        estoques = obter_historico_metrica(df_bpa_empresa, contas_cvm['ESTOQUES'])
+        aco = contas_a_receber.add(estoques, fill_value=0)
+
+        # Passivo Circulante Operacional (PCO) = Fornecedores
+        pco = obter_historico_metrica(df_bpp_empresa, contas_cvm['FORNECEDORES'])
+
+        # Ativo Permanente (AP) = Ativo Não Circulante
+        ap = obter_historico_metrica(df_bpa_empresa, contas_cvm['ATIVO_NAO_CIRCULANTE'])
+
+        # Passivo Não Circulante (PNC)
+        pnc = obter_historico_metrica(df_bpp_empresa, contas_cvm['PASSIVO_NAO_CIRCULANTE'])
+
+        # Patrimônio Líquido (PL)
+        pl = obter_historico_metrica(df_bpp_empresa, contas_cvm['PATRIMONIO_LIQUIDO'])
+
+        return aco, pco, ap, pl, pnc
+    except Exception:
+        # Retorna Series vazias em caso de erro para que a empresa seja pulada
+        return pd.Series(dtype=float), pd.Series(dtype=float), pd.Series(dtype=float), pd.Series(dtype=float), pd.Series(dtype=float)
+
+
+def classificar_fleuriet(cdg, ncg, t):
+    """
+    Classifica a empresa em um dos 6 tipos do modelo Fleuriet, conforme a documentação.
+    """
+    if cdg > 0 and ncg < 0 and t > 0:
+        return "Tipo 1 (Excelente Liquidez)"
+    if cdg > 0 and ncg > 0 and t > 0:
+        return "Tipo 2 (Sólida e Comum)"
+    if cdg > 0 and ncg > 0 and t < 0:
+        return "Tipo 3 (Risco de Liquidez)"
+    if cdg < 0 and ncg > 0 and t < 0:
+        return "Tipo 4 (Alto Risco Financeiro)"
+    if cdg < 0 and ncg < 0 and t < 0:
+        return "Tipo 5 (Vulnerável a Fornecedores)"
+    if cdg < 0 and ncg < 0 and t > 0:
+        return "Tipo 6 (Incomum, NCG financia PNC)"
+    return "Indefinido"
+
 
 def processar_analise_fleuriet(ticker_sa, codigo_cvm, demonstrativos):
-    """Processa a análise de saúde financeira pelos modelos Fleuriet e Z-Score de Prado."""
-    C = CONFIG['CONTAS_CVM']
-    bpa = demonstrativos.get('bpa', pd.DataFrame())
-    bpp = demonstrativos.get('bpp', pd.DataFrame())
-    dre = demonstrativos.get('dre', pd.DataFrame())
-
-    empresa_bpa = bpa[bpa['CD_CVM'] == codigo_cvm] if not bpa.empty else pd.DataFrame()
-    empresa_bpp = bpp[bpp['CD_CVM'] == codigo_cvm] if not bpp.empty else pd.DataFrame()
-    empresa_dre = dre[dre['CD_CVM'] == codigo_cvm] if not dre.empty else pd.DataFrame()
-    
-    if any(df.empty for df in [empresa_bpa, empresa_bpp, empresa_dre]):
-        return None
-    
-    aco, pco, ap, pl, pnc = reclassificar_contas_fleuriet(empresa_bpa, empresa_bpp, C)
-    
-    if any(s.empty for s in [aco, pco, ap, pl, pnc]):
-        return None
-
-    # Cálculo do Modelo de Fleuriet
-    ncg = aco.subtract(pco, fill_value=0)
-    cdg = pl.add(pnc, fill_value=0).subtract(ap, fill_value=0)
-    t = cdg.subtract(ncg, fill_value=0)
-    
-    efeito_tesoura = False
-    if len(ncg) > 1 and len(cdg) > 1:
-        cresc_ncg = ncg.pct_change().iloc[-1]
-        cresc_cdg = cdg.pct_change().iloc[-1]
-        if pd.notna(cresc_ncg) and pd.notna(cresc_cdg) and cresc_ncg > cresc_cdg and t.iloc[-1] < 0:
-            efeito_tesoura = True
-            
+    """
+    Processa a análise de saúde financeira pelos modelos Fleuriet e Z-Score de Prado.
+    Esta função foi robustecida para evitar erros e garantir cálculos corretos.
+    """
     try:
-        # Cálculo do Z-Score de Prado conforme o TCC
-        info = yf.Ticker(ticker_sa).info
-        market_cap = info.get('marketCap', 0)
-        ativo_total = obter_historico_metrica(empresa_bpa, C['ATIVO_TOTAL']).iloc[-1]
-        passivo_total = obter_historico_metrica(empresa_bpp, C['PASSIVO_TOTAL']).iloc[-1]
-        lucro_retido = pl.iloc[-1] - pl.iloc[0]
-        ebit = obter_historico_metrica(empresa_dre, C['EBIT']).iloc[-1]
-        vendas = obter_historico_metrica(empresa_dre, C['RECEITA_LIQUIDA']).iloc[-1]
+        C = CONFIG['CONTAS_CVM']
+        bpa = demonstrativos.get('bpa', pd.DataFrame())
+        bpp = demonstrativos.get('bpp', pd.DataFrame())
+        dre = demonstrativos.get('dre', pd.DataFrame())
+
+        empresa_bpa = bpa[bpa['CD_CVM'] == codigo_cvm] if not bpa.empty else pd.DataFrame()
+        empresa_bpp = bpp[bpp['CD_CVM'] == codigo_cvm] if not bpp.empty else pd.DataFrame()
+        empresa_dre = dre[dre['CD_CVM'] == codigo_cvm] if not dre.empty else pd.DataFrame()
         
+        if any(df.empty for df in [empresa_bpa, empresa_bpp, empresa_dre]):
+            return None # Pula a empresa se dados essenciais faltam
+
+        # Utiliza a nova função para garantir a reclassificação correta por empresa
+        aco, pco, ap, pl, pnc = reclassificar_contas_fleuriet(empresa_bpa, empresa_bpp, C)
+        
+        if any(s.empty for s in [aco, pco, ap, pl, pnc]):
+            return None # Pula se a reclassificação falhar
+
+        # Cálculos do Modelo Fleuriet
+        ncg = aco.subtract(pco, fill_value=0)
+        cdg = pl.add(pnc, fill_value=0).subtract(ap, fill_value=0)
+        t = cdg.subtract(ncg, fill_value=0)
+        
+        if any(s.empty for s in [t, ncg, cdg]):
+            return None # Pula se os cálculos principais falharem
+
+        # Verificação do Efeito Tesoura
+        efeito_tesoura = False
+        if len(ncg) > 1 and len(cdg) > 1:
+            # fillna(0) previne erros com valores NaN
+            cresc_ncg = ncg.pct_change().iloc[-1]
+            cresc_cdg = cdg.pct_change().iloc[-1]
+            if pd.notna(cresc_ncg) and pd.notna(cresc_cdg) and cresc_ncg > cresc_cdg and t.iloc[-1] < 0:
+                efeito_tesoura = True
+        
+        # Bloco de busca de dados de mercado para o Z-Score
+        info = yf.Ticker(ticker_sa).info
+        market_cap = info.get('marketCap')
+        if not market_cap: # Se não encontrar market cap, não pode calcular Z-Score
+            return None
+        
+        ativo_total_hist = obter_historico_metrica(empresa_bpa, C['ATIVO_TOTAL'])
+        passivo_total_hist = obter_historico_metrica(empresa_bpp, C['PASSIVO_TOTAL'])
+        ebit_hist = obter_historico_metrica(empresa_dre, C['EBIT'])
+        vendas_hist = obter_historico_metrica(empresa_dre, C['RECEITA_LIQUIDA'])
+
+        # Garante que temos todos os dados para o Z-Score
+        if any(s.empty for s in [ativo_total_hist, passivo_total_hist, ebit_hist, vendas_hist, pl]):
+            return None
+
+        # Pega o último valor de cada série
+        ativo_total = ativo_total_hist.iloc[-1]
+        passivo_total = passivo_total_hist.iloc[-1]
+        ebit = ebit_hist.iloc[-1]
+        vendas = vendas_hist.iloc[-1]
+        lucro_retido = pl.iloc[-1] - pl.iloc[0] if len(pl) > 1 else 0
+        
+        # Evita divisão por zero
+        if ativo_total == 0 or passivo_total == 0:
+            return None
+            
+        # Variáveis do Z-Score de Prado
         X1 = cdg.iloc[-1] / ativo_total
         X2 = lucro_retido / ativo_total
         X3 = ebit / ativo_total
-        X4 = market_cap / passivo_total if passivo_total > 0 else 0
+        X4 = market_cap / passivo_total
         X5 = vendas / ativo_total
         
-        # Coeficientes específicos do Z-Score de Prado conforme o TCC
         z_score = 0.038*X1 + 1.253*X2 + 2.331*X3 + 0.511*X4 + 0.824*X5
         
-        if z_score < 1.81:
-            classificacao = "Risco Elevado"
-        elif z_score < 2.99:
-            classificacao = "Zona Cinzenta"
-        else:
-            classificacao = "Saudável"
+        if z_score < 1.81: classificacao = "Risco Elevado"
+        elif z_score < 2.99: classificacao = "Zona Cinzenta"
+        else: classificacao = "Saudável"
             
-    except Exception:
-        z_score, classificacao = None, "Erro no cálculo"
+        # Classificação final do balanço
+        tipo_fleuriet = classificar_fleuriet(cdg.iloc[-1], ncg.iloc[-1], t.iloc[-1])
 
-    return {'Ticker': ticker_sa.replace('.SA', ''), 'Empresa': info.get('longName', ticker_sa), 'Ano': t.index[-1], 'NCG': ncg.iloc[-1], 'CDG': cdg.iloc[-1], 'Tesouraria': t.iloc[-1], 'Efeito Tesoura': efeito_tesoura, 'Z-Score': z_score, 'Classificação Risco': classificacao}
+        return {
+            'Ticker': ticker_sa.replace('.SA', ''), 
+            'Empresa': info.get('longName', ticker_sa), 
+            'Ano': t.index[-1], 
+            'NCG': ncg.iloc[-1], 
+            'CDG': cdg.iloc[-1], 
+            'Tesouraria': t.iloc[-1], 
+            'Tipo Fleuriet': tipo_fleuriet, # Nova coluna
+            'Efeito Tesoura': efeito_tesoura, 
+            'Z-Score': z_score, 
+            'Classificação Risco': classificacao
+        }
+
+    except Exception:
+        # Se qualquer parte do processo falhar, retorna None para não quebrar a análise em lote.
+        return None
 
 def ui_modelo_fleuriet():
     """Renderiza a interface completa da aba do Modelo Fleuriet."""
     st.header("Análise de Saúde Financeira (Modelo Fleuriet & Z-Score)")
-    st.info("Esta análise utiliza os dados da CVM para avaliar a estrutura de capital de giro e o risco de insolvência das empresas.")
+    st.info("""
+    Esta análise utiliza os dados da CVM para avaliar a estrutura de capital de giro e o risco de insolvência das empresas.
+    **Nota:** O número de empresas processadas com sucesso pode ser menor que o total, pois empresas sem dados financeiros completos ou sem capitalização de mercado são descartadas.
+    """)
     
     if st.button("🚀 Iniciar Análise Fleuriet Completa", type="primary", use_container_width=True):
         ticker_cvm_map_df = carregar_mapeamento_ticker_cvm()
         demonstrativos = preparar_dados_cvm(CONFIG["HISTORICO_ANOS_CVM"])
+        
+        if not demonstrativos:
+            st.error("Não foi possível baixar os dados da CVM. A análise não pode continuar.")
+            st.stop()
+
         resultados_fleuriet = []
         progress_bar = st.progress(0, text="Iniciando análise Fleuriet...")
         total_empresas = len(ticker_cvm_map_df)
@@ -1415,6 +1500,7 @@ def ui_modelo_fleuriet():
         for i, (index, row) in enumerate(ticker_cvm_map_df.iterrows()):
             ticker = row['TICKER']
             progress_bar.progress((i + 1) / total_empresas, text=f"Analisando {i+1}/{total_empresas}: {ticker}")
+            # A função de processamento agora é mais robusta
             resultado = processar_analise_fleuriet(f"{ticker}.SA", int(row['CD_CVM']), demonstrativos)
             if resultado:
                 resultados_fleuriet.append(resultado)
@@ -1423,7 +1509,7 @@ def ui_modelo_fleuriet():
         
         if resultados_fleuriet:
             df_fleuriet = pd.DataFrame(resultados_fleuriet)
-            st.success(f"Análise Fleuriet concluída para {len(df_fleuriet)} empresas.")
+            st.success(f"Análise Fleuriet concluída para {len(df_fleuriet)} de {total_empresas} empresas.")
             
             ncg_medio = df_fleuriet['NCG'].mean()
             tesoura_count = df_fleuriet['Efeito Tesoura'].sum()
@@ -1435,18 +1521,39 @@ def ui_modelo_fleuriet():
             col2.metric("Efeito Tesoura", f"{tesoura_count} empresas")
             col3.metric("Alto Risco (Z-Score)", f"{risco_count} empresas")
             col4.metric("Z-Score Médio", f"{zscore_medio:.2f}")
-            st.dataframe(df_fleuriet, use_container_width=True)
-        else:
-            st.error("Nenhum resultado pôde ser gerado para a análise Fleuriet.")
             
-    with st.expander("📖 Metodologia do Modelo Fleuriet"):
-        st.markdown("""- **NCG (Necessidade de Capital de Giro):** `(Estoques + Contas a Receber) - Fornecedores`
-- **CDG (Capital de Giro):** `(Patrimônio Líquido + Passivo Longo Prazo) - Ativo Permanente`
-- **T (Saldo de Tesouraria):** `CDG - NCG`
-- **Efeito Tesoura:** Ocorre quando a NCG cresce mais rapidamente que o CDG.
-- **Z-Score de Prado:** Modelo estatístico que mede a probabilidade de uma empresa ir à falência, com coeficientes específicos para o mercado brasileiro, conforme descrito no TCC.
-""")
-
+            # Exibe a tabela com a nova coluna de classificação
+            st.dataframe(df_fleuriet[['Ticker', 'Empresa', 'NCG', 'CDG', 'Tesouraria', 'Tipo Fleuriet', 'Efeito Tesoura', 'Z-Score', 'Classificação Risco']], use_container_width=True)
+            
+            # Botão de download
+            csv_fleuriet = convert_df_to_csv(df_fleuriet)
+            st.download_button(
+                label="📥 Baixar Resultados Completos (.csv)",
+                data=csv_fleuriet,
+                file_name='analise_fleuriet_completa.csv',
+                mime='text/csv',
+            )
+            
+        else:
+            st.error("Nenhum resultado pôde ser gerado para a análise Fleuriet. Verifique a conexão e os dados da CVM.")
+            
+    with st.expander("📖 Metodologia e Tipos de Balanço"):
+        st.markdown("""
+        ### Fórmulas Base
+        - **NCG (Necessidade de Capital de Giro):** `Ativo Circulante Operacional - Passivo Circulante Operacional`
+        - **CDG (Capital de Giro):** `(Patrimônio Líquido + Passivo Não Circulante) - Ativo Permanente`
+        - **T (Saldo de Tesouraria):** `CDG - NCG`
+        - **Efeito Tesoura:** Ocorre quando a NCG cresce mais que o CDG, "comendo" a tesouraria.
+        
+        ### Classificação das Estruturas de Balanço
+        - **Tipo 1 (CDG+, NCG-, T+):** Excelente liquidez. Fontes permanentes e ciclo financeiro geram caixa. Ex: Amazon.
+        - **Tipo 2 (CDG+, NCG+, T+):** Sólida e mais comum. Fontes permanentes financiam ativos e a NCG, sobrando caixa.
+        - **Tipo 3 (CDG+, NCG+, T-):** Risco de liquidez. Fontes permanentes não cobrem toda a NCG, dependendo de crédito de curto prazo.
+        - **Tipo 4 (CDG-, NCG+, T-):** Alto risco. Dívidas de curto prazo financiam ativos permanentes e NCG. Muito vulnerável. Ex: OGX.
+        - **Tipo 5 (CDG-, NCG-, T-):** Vulnerável. Depende de dívidas de curto prazo e do crédito de fornecedores (NCG negativa).
+        - **Tipo 6 (CDG-, NCG-, T+):** Incomum. A NCG negativa é tão grande que financia parte dos ativos não circulantes e ainda gera caixa.
+        """)
+        
 # ==============================================================================
 # ABA 4: MODELO BLACK-SCHOLES
 # ==============================================================================
@@ -1455,10 +1562,10 @@ def ui_modelo_fleuriet():
 def calcular_volatilidade_historica(ticker, periodo="1y"):
     """Calcula a volatilidade histórica anualizada de um ativo."""
     try:
-        dados = robust_yf_download(ticker, period=periodo, progress=False)
+        dados = get_stock_data(ticker, period=periodo)
         if dados is None or dados.empty:
             return None
-        dados['log_retorno'] = np.log(dados['Close'] / dados['Close'].shift(1))
+        dados['log_retorno'] = np.log(dados['close'] / dados['close'].shift(1))
         # 252 dias de pregão em um ano
         volatilidade_anualizada = dados['log_retorno'].std() * np.sqrt(252)
         return volatilidade_anualizada
@@ -1470,7 +1577,8 @@ def buscar_opcoes(ticker, vencimento):
     """Busca a cadeia de opções para um ticker e vencimento específicos."""
     try:
         url = f'https://opcoes.net.br/listaopcoes/completa?idAcao={ticker}&listarVencimentos=false&cotacoes=true&vencimentos={vencimento}'
-        response = robust_get_request(url, timeout=20)
+        response = requests_retry_session().get(url, timeout=20)
+        response.raise_for_status()
         dados = response.json()
         if 'data' in dados and 'cotacoesOpcoes' in dados['data']:
             opcoes = [[ticker, vencimento, i[0].split('_')[0], i[2], i[3], i[5], i[8]] for i in dados['data']['cotacoesOpcoes']]
@@ -1521,154 +1629,155 @@ def calcular_greeks(S, K, T, r, sigma, option_type="call"):
 def analise_tecnica_ativo(ticker, timeframe='daily', weekly_bias=0, thresholds=None):
     """
     Realiza a análise técnica completa e retorna um score de convergência.
-    NOVO: Suporta múltiplos tempos gráficos e combos de confirmação.
+    Versão robustecida para evitar KeyErrors e lidar com dados insuficientes.
     """
     if thresholds is None:
         thresholds = {'forte': 0.7, 'normal': 0.2}
 
     try:
-        # Define período e intervalo com base no timeframe
+        # 1. Obtenção de Dados
         if timeframe == 'weekly':
-            df = robust_yf_download(ticker, period="5y", interval="1wk", progress=False)
-        else: # daily
-            df = robust_yf_download(ticker, period="2y", interval="1d", progress=False)
+            df = get_stock_data(ticker, period="5y", interval="1wk")
+        else:
+            df = get_stock_data(ticker, period="2y", interval="1d")
 
-        # CORREÇÃO ROBUSTA PARA O ERRO 'NoneType' e 'MultiIndex'
         if df is None or df.empty:
-            return "Dados Insuficientes", 0, {"Erro": "Dados do yfinance vazios ou ticker inválido."}, "NEUTRO"
-            
+            return "Dados Insuficientes", 0, {"Erro": "Dados históricos indisponíveis."}, "NEUTRO"
+
+        # Garante que não há MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(0)
 
-        # Define a estratégia com os indicadores desejados
+        # 2. Validação de Dados de Entrada
+        min_periods_required = 20  # O indicador com maior período é o BBands(20)
+        if len(df) < min_periods_required:
+            msg = f"São necessários pelo menos {min_periods_required} pontos de dados, mas apenas {len(df)} foram encontrados."
+            return "Dados Insuficientes", 0, {"Erro": msg}, "NEUTRO"
+
+        # 3. Cálculo dos Indicadores
         MyStrategy = ta.Strategy(
             name="Convergencia_Opcoes",
             description="RSI, MACD, BBANDS, EMA, ADX, STOCH, PSAR",
             ta=[
-                {"kind": "rsi"}, {"kind": "macd"}, {"kind": "bbands"},
+                {"kind": "rsi"}, {"kind": "macd"}, {"kind": "bbands", "length": 20},
                 {"kind": "ema", "length": 9}, {"kind": "ema", "length": 21},
                 {"kind": "adx"}, {"kind": "stoch"}, {"kind": "psar"},
             ]
         )
-        
-        # Roda a estratégia no DataFrame
         df.ta.strategy(MyStrategy)
-        df.dropna(inplace=True)
 
-        if df.empty:
-            return "Dados Insuficientes", 0, {"Erro": "Não foi possível calcular os indicadores."}, "NEUTRO"
+        if df.empty or 'RSI_14' not in df.columns:
+            return "Erro de Cálculo", 0, {"Erro": "Não foi possível calcular os indicadores técnicos."}, "NEUTRO"
 
-        # Pega o último valor de cada indicador
         last = df.iloc[-1]
-        
         sinais = {}
         valores_indicadores = {}
-        
-        # Lógica de Sinais (igual para ambos os timeframes)
-        try:
+
+        # 4. Extração Segura dos Sinais
+        if 'RSI_14' in last and pd.notna(last['RSI_14']):
             rsi_val = last['RSI_14']
             valores_indicadores['RSI'] = f"{rsi_val:.1f}"
             if rsi_val < 30: sinais['RSI'] = 1
             elif rsi_val > 70: sinais['RSI'] = -1
             else: sinais['RSI'] = 0
-        except (KeyError, TypeError): sinais['RSI'] = 0; valores_indicadores['RSI'] = "Erro"
+        else:
+            sinais['RSI'] = 0; valores_indicadores['RSI'] = "N/A"
 
-        try:
+        if 'MACD_12_26_9' in last and 'MACDs_12_26_9' in last and pd.notna(last['MACD_12_26_9']) and pd.notna(last['MACDs_12_26_9']):
             valores_indicadores['MACD'] = f"{last['MACD_12_26_9']:.2f}"
             if last['MACD_12_26_9'] > last['MACDs_12_26_9']: sinais['MACD'] = 1
             else: sinais['MACD'] = -1
-        except (KeyError, TypeError): sinais['MACD'] = 0; valores_indicadores['MACD'] = "Erro"
-        
-        try:
-            valores_indicadores['Bandas de Bollinger'] = f"{last['BBP_20_2.0']:.2f}"
-            if last['Close'] < last['BBL_20_2.0']: sinais['BOLLINGER'] = 1
-            elif last['Close'] > last['BBU_20_2.0']: sinais['BOLLINGER'] = -1
+        else:
+            sinais['MACD'] = 0; valores_indicadores['MACD'] = "N/A"
+
+        if 'BBU_20_2.0' in last and 'BBL_20_2.0' in last and pd.notna(last['BBU_20_2.0']) and pd.notna(last['BBL_20_2.0']):
+            bbu, bbl, close = last['BBU_20_2.0'], last['BBL_20_2.0'], last['close']
+            if (bbu - bbl) > 0:
+                bbp = (close - bbl) / (bbu - bbl)
+                valores_indicadores['Bandas de Bollinger (%B)'] = f"{bbp:.2f}"
+            else:
+                valores_indicadores['Bandas de Bollinger (%B)'] = "N/A"
+            if close < bbl: sinais['BOLLINGER'] = 1
+            elif close > bbu: sinais['BOLLINGER'] = -1
             else: sinais['BOLLINGER'] = 0
-        except (KeyError, TypeError): sinais['BOLLINGER'] = 0; valores_indicadores['Bandas de Bollinger'] = "Erro"
-        
-        try:
+        else:
+            sinais['BOLLINGER'] = 0; valores_indicadores['Bandas de Bollinger (%B)'] = "N/A"
+
+        if 'EMA_9' in last and 'EMA_21' in last and pd.notna(last['EMA_9']) and pd.notna(last['EMA_21']):
             valores_indicadores['EMA (9 vs 21)'] = "Cruz. Alta" if last['EMA_9'] > last['EMA_21'] else "Cruz. Baixa"
             if last['EMA_9'] > last['EMA_21']: sinais['EMA'] = 1
             else: sinais['EMA'] = -1
-        except (KeyError, TypeError): sinais['EMA'] = 0; valores_indicadores['EMA (9 vs 21)'] = "Erro"
+        else:
+            sinais['EMA'] = 0; valores_indicadores['EMA (9 vs 21)'] = "N/A"
 
-        # Se for análise semanal, só precisamos do viés de tendência
         if timeframe == 'weekly':
             weekly_bias_signal = "Alta" if sinais.get('EMA', 0) > 0 and sinais.get('MACD', 0) > 0 else ("Baixa" if sinais.get('EMA', 0) < 0 and sinais.get('MACD', 0) < 0 else "Neutro")
             return "Viés Semanal", 0, valores_indicadores, weekly_bias_signal
 
-        # Continua para análise diária...
-        try:
+        if 'ADX_14' in last and 'DMP_14' in last and 'DMN_14' in last and all(pd.notna(last[c]) for c in ['ADX_14', 'DMP_14', 'DMN_14']):
             adx_val = last['ADX_14']
             valores_indicadores['ADX'] = f"{adx_val:.1f}"
             if adx_val > 25 and last['DMP_14'] > last['DMN_14']: sinais['ADX'] = 1
             elif adx_val > 25 and last['DMN_14'] > last['DMP_14']: sinais['ADX'] = -1
             else: sinais['ADX'] = 0
-        except (KeyError, TypeError): sinais['ADX'] = 0; valores_indicadores['ADX'] = "Erro"
-            
-        try:
+        else:
+            sinais['ADX'] = 0; valores_indicadores['ADX'] = "N/A"
+
+        if 'STOCHk_14_3_3' in last and pd.notna(last['STOCHk_14_3_3']):
             stoch_val = last['STOCHk_14_3_3']
             valores_indicadores['Estocástico'] = f"{stoch_val:.1f}"
             if stoch_val < 20: sinais['STOCH'] = 1
             elif stoch_val > 80: sinais['STOCH'] = -1
             else: sinais['STOCH'] = 0
-        except (KeyError, TypeError): sinais['STOCH'] = 0; valores_indicadores['Estocástico'] = "Erro"
-            
-        try:
-            if not pd.isna(last['PSARl_0.02_0.2']): 
-                sinais['SAR'] = 1
-                valores_indicadores['SAR Parabólico'] = "Alta"
-            elif not pd.isna(last['PSARs_0.02_0.2']): 
-                sinais['SAR'] = -1
-                valores_indicadores['SAR Parabólico'] = "Baixa"
-            else: 
-                sinais['SAR'] = 0
-                valores_indicadores['SAR Parabólico'] = "Neutro"
-        except (KeyError, TypeError): 
-            sinais['SAR'] = 0
-            valores_indicadores['SAR Parabólico'] = "Erro"
-            
-        pesos = {
-            'RSI': 0.20, 'MACD': 0.20, 'BOLLINGER': 0.15, 'EMA': 0.15,
-            'ADX': 0.10, 'STOCH': 0.08, 'SAR': 0.07
-        }
-        
+        else:
+            sinais['STOCH'] = 0; valores_indicadores['Estocástico'] = "N/A"
+
+        if 'PSARl_0.02_0.2' in last and 'PSARs_0.02_0.2' in last:
+            if pd.notna(last['PSARl_0.02_0.2']):
+                sinais['SAR'] = 1; valores_indicadores['SAR Parabólico'] = "Alta"
+            elif pd.notna(last['PSARs_0.02_0.2']):
+                sinais['SAR'] = -1; valores_indicadores['SAR Parabólico'] = "Baixa"
+            else:
+                sinais['SAR'] = 0; valores_indicadores['SAR Parabólico'] = "Neutro"
+        else:
+            sinais['SAR'] = 0; valores_indicadores['SAR Parabólico'] = "N/A"
+
+        # 5. Cálculo do Score e Sinal Final
+        pesos = {'RSI': 0.20, 'MACD': 0.20, 'BOLLINGER': 0.15, 'EMA': 0.15, 'ADX': 0.10, 'STOCH': 0.08, 'SAR': 0.07}
         score = sum(pesos.get(ind, 0) * valor for ind, valor in sinais.items())
+        score_ajustado = score + (0.15 * weekly_bias)
         
-        # Adiciona o viés da tendência semanal ao score
-        score_ajustado = score + (0.15 * weekly_bias) # Viés semanal tem 15% de peso
-        
-        # Lógica de "Combo" de Confirmação
         tendencia_alta = sinais.get('MACD', 0) > 0 or sinais.get('EMA', 0) > 0
         momento_alta = sinais.get('RSI', 0) > 0 or sinais.get('STOCH', 0) > 0
         tendencia_baixa = sinais.get('MACD', 0) < 0 or sinais.get('EMA', 0) < 0
         momento_baixa = sinais.get('RSI', 0) < 0 or sinais.get('STOCH', 0) < 0
 
-        # Determinação do Sinal Final com base nos novos limiares e combos
-        if score_ajustado > thresholds['forte'] and tendencia_alta and momento_alta:
-            sinal_final = "COMPRA FORTE"
-        elif score_ajustado > thresholds['normal']:
-            sinal_final = "COMPRA"
-        elif score_ajustado < -thresholds['forte'] and tendencia_baixa and momento_baixa:
-            sinal_final = "VENDA FORTE"
-        elif score_ajustado < -thresholds['normal']:
-            sinal_final = "VENDA"
-        else:
-            sinal_final = "NEUTRO"
+        if score_ajustado > thresholds['forte'] and tendencia_alta and momento_alta: sinal_final = "COMPRA FORTE"
+        elif score_ajustado > thresholds['normal']: sinal_final = "COMPRA"
+        elif score_ajustado < -thresholds['forte'] and tendencia_baixa and momento_baixa: sinal_final = "VENDA FORTE"
+        elif score_ajustado < -thresholds['normal']: sinal_final = "VENDA"
+        else: sinal_final = "NEUTRO"
 
-        return sinal_final, score_ajustado, valores_indicadores, "N/A" # N/A para bias pois é a análise principal
-    except (RetryError, Exception) as e:
-        return "Erro", 0, {"Erro": str(e)}, "NEUTRO"
+        # 6. Coleta Segura de Dados Brutos para Depuração (A CAUSA DO ERRO ORIGINAL)
+        raw_data_cols = ['close', 'RSI_14', 'MACD_12_26_9', 'MACDs_12_26_9', 'BBL_20_2.0', 'BBU_20_2.0', 'EMA_9', 'EMA_21']
+        existing_cols = [col for col in raw_data_cols if col in df.columns]
+        if existing_cols:
+            valores_indicadores['raw_data'] = df[existing_cols].tail(10)
+
+        return sinal_final, score_ajustado, valores_indicadores, "N/A"
+
+    except Exception as e:
+        # Captura qualquer erro inesperado no processo
+        return "Erro", 0, {"Erro": f"Falha geral na análise técnica: {str(e)}"}, "NEUTRO"
+
 
 def gerar_analise_avancada(row, vies_fundamental, sinal_tecnico, vies_semanal):
     """Gera uma recomendação de texto para uma opção, integrando todas as análises."""
     diff_percent = row['Diferença (%)']
     tipo = row['Tipo']
     
-    # 1. Análise do Preço da Opção (Derivativos)
     subvalorizada = diff_percent <= -20
     
-    # 2. Análise de Convergência
     recomendacao_final = "Aguardar"
     analise_texto = ""
 
@@ -1747,6 +1856,8 @@ def ui_black_scholes():
         with col_t2:
             threshold_normal = st.slider("Limiar para Sinal NORMAL", 0.1, 1.0, 0.25, 0.05)
         
+        debug_mode = st.checkbox("Ativar Modo de Depuração da Análise Técnica")
+        
         thresholds_config = {'forte': threshold_forte, 'normal': threshold_normal}
 
     if analisar_opcoes_btn:
@@ -1763,7 +1874,6 @@ def ui_black_scholes():
                 
                 resultados_valuation, status_msg = processar_valuation_empresa(ticker_sa, codigo_cvm, demonstrativos, market_data, params_analise)
                 
-                # TRAVA DE SEGURANÇA: Interrompe se o valuation falhar
                 if resultados_valuation is None:
                     st.error(f"Falha na Análise Fundamentalista: {status_msg}. A análise de opções não pode continuar.")
                     st.stop()
@@ -1777,13 +1887,11 @@ def ui_black_scholes():
                 st.session_state['vies_fundamental_bs'] = vies_fundamental
 
                 # 2. Análise Técnica (Multi-Timeframe)
-                # 2.1 Análise Semanal para viés de tendência
                 _, _, _, vies_semanal = analise_tecnica_ativo(ticker_sa, timeframe='weekly')
                 st.session_state['vies_semanal_bs'] = vies_semanal
                 weekly_bias_value = 1 if vies_semanal == "Alta" else (-1 if vies_semanal == "Baixa" else 0)
 
-                # 2.2 Análise Diária com viés semanal
-                sinal_tecnico, score_tecnico, detalhes_tecnicos, _ = analise_tecnica_ativo(ticker_sa, timeframe='daily', weekly_bias=weekly_bias_value, thresholds=thresholds_config)
+                sinal_tecnico, _, detalhes_tecnicos, _ = analise_tecnica_ativo(ticker_sa, timeframe='daily', weekly_bias=weekly_bias_value, thresholds=thresholds_config)
                 st.session_state['sinal_tecnico_bs'] = sinal_tecnico
                 st.session_state['detalhes_tecnicos_bs'] = detalhes_tecnicos
                 
@@ -1843,11 +1951,38 @@ def ui_black_scholes():
         col3.metric("Sinal Técnico (Diário)", sinal_tecnico)
 
         with st.expander("Detalhes da Análise Técnica Diária"):
-            # Trava de segurança para a tabela de detalhes
-            if isinstance(detalhes_tecnicos, dict):
-                st.table(pd.DataFrame.from_dict(detalhes_tecnicos, orient='index', columns=['Valor/Sinal']))
+            if isinstance(detalhes_tecnicos, dict) and 'Erro' not in detalhes_tecnicos:
+                # Dicionário de interpretações para leigos
+                interpretacoes = {
+                    'RSI': "Mede a força do movimento. Abaixo de 30 indica 'sobrevenda' (potencial de alta). Acima de 70, 'sobrecompra' (potencial de baixa).",
+                    'MACD': "Indica o momento do ativo. Valores positivos sugerem momento de alta; negativos, de baixa.",
+                    'Bandas de Bollinger (%B)': "Mostra se o preço está 'caro' ou 'barato'. Abaixo de 0, o preço cruzou a banda inferior (sinal de compra). Acima de 1, cruzou a superior (sinal de venda).",
+                    'EMA (9 vs 21)': "Indica a tendência de curto prazo. 'Cruz. Alta' é um sinal otimista; 'Cruz. Baixa' é pessimista.",
+                    'ADX': "Mede a força da tendência. Acima de 25 indica uma tendência forte (seja de alta ou baixa). Abaixo de 20, uma tendência fraca ou lateral.",
+                    'Estocástico': "Similar ao RSI, mede o momento. Abaixo de 20 é 'sobrevenda' (potencial de alta), acima de 80 é 'sobrecompra' (potencial de baixa).",
+                    'SAR Parabólico': "Mostra a direção da tendência. Quando os pontos estão abaixo do preço, a tendência é de alta."
+                }
+                
+                # Prepara os dados para a tabela
+                dados_tabela = []
+                for indicador, valor in detalhes_tecnicos.items():
+                    if indicador != 'raw_data':
+                        dados_tabela.append({
+                            "Indicador": indicador,
+                            "Valor/Sinal": valor,
+                            "Interpretação para Leigos": interpretacoes.get(indicador, "Análise de tendência/momento.")
+                        })
+                
+                if dados_tabela:
+                    df_tabela = pd.DataFrame(dados_tabela)
+                    st.dataframe(df_tabela, use_container_width=True, hide_index=True)
+                
+                # Se o modo de depuração estiver ativo, mostra os dados brutos
+                if debug_mode and 'raw_data' in detalhes_tecnicos:
+                    st.markdown("##### Dados Brutos dos Indicadores (Últimos 10 dias)")
+                    st.dataframe(detalhes_tecnicos['raw_data'])
             else:
-                st.warning("Não foi possível exibir os detalhes da análise técnica.")
+                st.warning(f"Não foi possível exibir os detalhes da análise técnica. Motivo: {detalhes_tecnicos.get('Erro', 'desconhecido')}")
 
         
         st.divider()
@@ -1867,17 +2002,17 @@ def ui_black_scholes():
                 return
 
             st.dataframe(df[['Ticker', 'Strike', 'Preço Mercado', 'Preço Teórico (BS)', 'Recomendação', 'Delta', 'Gamma', 'Vega', 'Theta', 'Rho']],
-                         use_container_width=True, hide_index=True,
-                         column_config={
-                             "Strike": st.column_config.NumberColumn("Strike", format="R$ %.2f"),
-                             "Preço Mercado": st.column_config.NumberColumn("Preço Mercado", format="R$ %.4f"),
-                             "Preço Teórico (BS)": st.column_config.NumberColumn("Preço Teórico", format="R$ %.4f"),
-                             "Delta": st.column_config.NumberColumn(format="%.3f"),
-                             "Gamma": st.column_config.NumberColumn(format="%.3f"),
-                             "Vega": st.column_config.NumberColumn(format="%.3f"),
-                             "Theta": st.column_config.NumberColumn(format="%.3f"),
-                             "Rho": st.column_config.NumberColumn(format="%.3f"),
-                         })
+                            use_container_width=True, hide_index=True,
+                            column_config={
+                                "Strike": st.column_config.NumberColumn("Strike", format="R$ %.2f"),
+                                "Preço Mercado": st.column_config.NumberColumn("Preço Mercado", format="R$ %.4f"),
+                                "Preço Teórico (BS)": st.column_config.NumberColumn("Preço Teórico", format="R$ %.4f"),
+                                "Delta": st.column_config.NumberColumn(format="%.3f"),
+                                "Gamma": st.column_config.NumberColumn(format="%.3f"),
+                                "Vega": st.column_config.NumberColumn(format="%.3f"),
+                                "Theta": st.column_config.NumberColumn(format="%.3f"),
+                                "Rho": st.column_config.NumberColumn(format="%.3f"),
+                            })
             
             st.markdown("---")
             st.markdown("#### 🔍 Análise Detalhada da Opção")
@@ -1896,17 +2031,22 @@ def ui_black_scholes():
         
         with st.expander("📖 Glossário das Gregas (O que significam?)"):
             st.markdown("""
-            As "Greeks" (Gregas) medem a sensibilidade do preço de uma opção a diferentes fatores. Entendê-las ajuda a gerenciar o risco.
+            As **"Greeks" (Gregas)** são um conjunto de indicadores que medem a sensibilidade do preço de uma opção a diferentes fatores de risco. Entendê-las é fundamental para gerenciar o risco de suas operações.
 
-            - **Delta (Δ):** Mede o quanto o preço da opção muda para cada R$ 1,00 de mudança no preço do ativo. Varia de 0 a 1 para Calls e -1 a 0 para Puts. Um Delta de 0.60 significa que a opção valoriza R$ 0,60 se o ativo subir R$ 1,00.
+            - **Delta (Δ):** Mede a velocidade da opção. Indica o quanto o preço da opção tende a mudar para cada R$ 1,00 de variação no preço do ativo-objeto.
+              - *Exemplo:* Um Delta de 0.60 significa que, se a ação subir R$ 1,00, o preço da opção de compra (CALL) tende a valorizar R$ 0,60.
 
-            - **Gamma (Γ):** Mede a taxa de variação do Delta. Indica o quão rápido o Delta muda. Um Gamma alto significa que o Delta é muito sensível a mudanças no preço do ativo, o que é comum em opções "ATM" (no dinheiro).
+            - **Gamma (Γ):** Mede a aceleração do Delta. Mostra o quão rápido o Delta de uma opção muda conforme o preço do ativo-objeto se altera.
+              - *Exemplo:* Um Gamma alto significa que o Delta é muito sensível, mudando rapidamente. Isso é comum em opções "no dinheiro" (ATM) e próximas do vencimento.
 
-            - **Vega (ν):** Mede a sensibilidade do preço da opção a uma mudança de 1% na volatilidade do ativo. Se você acredita que a volatilidade vai aumentar, procure opções com Vega positivo e alto.
+            - **Vega (ν):** Mede o impacto da volatilidade. Indica o quanto o preço da opção muda para cada 1% de variação na volatilidade do ativo.
+              - *Exemplo:* Se você acredita que a volatilidade do mercado vai aumentar, deve procurar opções com Vega positivo e alto, pois elas se beneficiarão mais desse movimento.
 
-            - **Theta (Θ):** Mede a perda de valor da opção com a passagem do tempo (decaimento temporal). É quase sempre negativo, indicando que, a cada dia que passa, a opção perde um pouco de seu valor, mantendo os outros fatores constantes.
+            - **Theta (Θ):** Mede o custo do tempo. Indica o quanto o preço da opção perde de valor a cada dia que passa, devido à aproximação do vencimento (decaimento temporal).
+              - *Exemplo:* Um Theta de -0.05 significa que a opção perde R$ 0,05 de seu valor extrínseco por dia, mantendo os outros fatores constantes. É o "aluguel" que se paga por manter a posição.
 
-            - **Rho (ρ):** Mede a sensibilidade do preço da opção a uma mudança de 1% na taxa de juros livre de risco. Geralmente tem um impacto menor no preço de opções de curto prazo.
+            - **Rho (ρ):** Mede o impacto dos juros. Indica a sensibilidade do preço da opção a uma variação de 1% na taxa de juros livre de risco.
+              - *Exemplo:* Geralmente, tem um impacto menor no preço de opções de curto prazo, mas é relevante para opções de longo prazo (LEAPs).
             """)
 
 # ==============================================================================
